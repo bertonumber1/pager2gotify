@@ -1,8 +1,15 @@
-#Pager2gotify
+Pager2gotify
 
-After Pagermon became deprecated and with PM2 clunky at best i wanted to integrate systemd,  bypass SQLite and forward messages straight to my phone from multimon-ng. This is a Minimal, reliable bridge from **multimon-ng / rtl_fm** pager decoding to **Gotify push notifications**.You can install the open source gotify app via Obtainium.
+Please be aware this is brought on the presumption basic linux/python knowledge is evident. If you contact me i will help you. 
 
-Designed for **clean, real-world pager monitoring** with mild to aggressive customisable filtering to remove junk traffic.
+After PagermonPi and Pagermon server/client became deprecated  using PM2 to start/stop and control things was clunky at best i decided to integrate systemd, remove the heavy webui and SQLite due to problems with node and obsolete npm.
+
+This simple python script does the work and forwards messages straight to your phone from multimon-ng using the same idea as pagermon but without the server/web front end and message database. 
+
+TL:DR....
+This is a minimal, though pretty reliable bridge from **multimon-ng / rtl_fm** pager decoding to **Gotify push notifications**. Set your desired frequency and rtl-sdr gain in reader.sh and edit pager2gotify.py to add your create new app API and add filters (if you want) You may install the open source 'gotify' app via Obtainium for firsthand updates.
+
+Designed for **clean, real-world pager monitoring** with mild to aggressive customisable python  filtering to remove junk traffic, indistinct and bad decodes concentrating on what you want to see and be notified of.
 
 ---
 
