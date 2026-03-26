@@ -13,7 +13,7 @@ Designed for **clean, real-world pager monitoring** with mild to aggressive cust
 
 ---
 
-✨ Features
+Features
 
 * Customisable Filters setting **POCSAG only** (ignores FLEX completely or whatever your choosing)
 * Supports **baud filtering (e.g. 512 only)**
@@ -29,7 +29,7 @@ Designed for **clean, real-world pager monitoring** with mild to aggressive cust
 
 ---
 
-📡 Example Output
+Example Output
 
 ```
 Mode: POCSAG
@@ -41,7 +41,7 @@ Wiedehopf spotted in shrubs on lake canterton.
 
 ---
 
-⚙️ Requirements
+Requirements
 
 * Linux (Raspberry Pi in this example)
 * `rtl_fm` or equivalent SDR input
@@ -50,7 +50,7 @@ Wiedehopf spotted in shrubs on lake canterton.
 
 ---
 
-🚀 Installation
+Installation
 
 1. Clone repo
 
@@ -139,7 +139,7 @@ journalctl -u pager2gotify -n 50 --no-pager
 
 ---
 
-🔧 Default Filtering Logic (example filter)
+Default Filtering Logic (example filter)
 
 Allowed:
 
@@ -157,7 +157,7 @@ Blocked:
 
 ---
 
-🧠 Customisation
+Customisation
 
 You can modify:
 
@@ -176,7 +176,7 @@ ALLOW_SUFFIXES = {"450", "451", "452"}
 
 ---
 
-📱 Why Gotify?
+Why Gotify?
 
 * Self-hosted
 * No Google dependency
@@ -186,12 +186,12 @@ ALLOW_SUFFIXES = {"450", "451", "452"}
 
 ---
 
-⚠️ Disclaimer
+Disclaimer
 
 Use only on frequencies you are licensed or permitted to monitor. This is a simple python based project i wrote myself. I thought i would upload it with the help of chatgpt as i have never used github before. Full kudos is with multimon-ng and the gotify devs. Thanks 
 
 ---
 
-📜 License
+License
 
 MIT
