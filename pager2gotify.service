@@ -1,0 +1,20 @@
+[Unit]
+Description=Pager decoder to Gotify
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/opt/pager2gotify
+Environment=GOTIFY_URL=http://YOUR_GOTIFY_SERVER:8088
+Environment=GOTIFY_TOKEN=YOUR_GOTIFY_APP_TOKEN
+Environment=ALLOW_BAUD=512
+Environment=ALLOW_SUFFIX=450
+ExecStart=/bin/bash /opt/pager2gotify/scripts/reader.sh.example
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

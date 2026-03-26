@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -o pipefail
+
+export GOTIFY_URL="http://YOUR_GOTIFY_SERVER:8088"
+export GOTIFY_TOKEN="YOUR_GOTIFY_APP_TOKEN"
+export ALLOW_BAUD="512"
+export ALLOW_SUFFIX="450"
+
+rtl_fm -d 0 -f 153.050M -s 22050 -g 42.1 - | \
+multimon-ng -t raw -a POCSAG512 -a POCSAG1200 -a POCSAG2400 -a FLEX - | \
+python3 /opt/pager2gotify/pager2gotify.py
