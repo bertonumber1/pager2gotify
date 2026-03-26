@@ -66,7 +66,7 @@ cd pager2gotify
 Edit:
 
 ```
-pager2gotify.py
+pager2gotify.py (sudo nano pager2gotify.py)
 ```
 
 Set your Gotify server:
@@ -86,7 +86,8 @@ chmod +x pager2gotify.py
 
 ---
 
-4. Create reader script
+4. Create reader script:
+rename reader.sh.example to reader.sh (sudo mv reader.sh.example reader.sh then edit with sudo nano reader.sh)
 
 Example:
 
@@ -138,7 +139,7 @@ journalctl -u pager2gotify -n 50 --no-pager
 
 ---
 
-🔧 Default Filtering Logic
+🔧 Default Filtering Logic (example filter)
 
 Allowed:
 
@@ -181,6 +182,7 @@ ALLOW_SUFFIXES = {"450", "451", "452"}
 * No Google dependency
 * Instant push
 * Simple HTTP API
+* Open source app
 
 ---
 
@@ -193,4 +195,3 @@ Use only on frequencies you are licensed or permitted to monitor. This is a simp
 📜 License
 
 MIT
-Pager
