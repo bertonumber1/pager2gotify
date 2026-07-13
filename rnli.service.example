@@ -1,0 +1,21 @@
+[Unit]
+Description=AIS-ADSB Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Change to the user that owns the install directory
+User=pi
+# Change both paths to wherever you cloned the repo
+WorkingDirectory=/home/pi/ais-adsb-dashboard
+ExecStart=/usr/bin/python3 /home/pi/ais-adsb-dashboard/rnli_ais_adsb_dashboard.py
+Restart=on-failure
+RestartSec=10
+# uvicorn shutdown can hang on open SSE connections — don't wait systemd's default 90 s
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

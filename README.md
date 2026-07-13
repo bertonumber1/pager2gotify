@@ -1,197 +1,166 @@
-Pager2gotify
+# AIS-ADSB Dashboard
 
-Please be aware this is brought on the presumption basic linux/python knowledge is evident. If you contact me i will help you. 
+A self-hosted, single-file web dashboard for a Raspberry Pi SDR monitoring station.
+Live **AIS shipping**, **ADS-B aircraft**, **APRS-IS** stations, **weather / lightning**,
+**tides** and an **intelligence log** — with **Telegram and Gotify push alerts** for
+SAR, military, law-enforcement and watched vessels/aircraft, plus distress beacons.
 
-After PagermonPi and Pagermon server/client became deprecated  using PM2 to start/stop and control things was clunky at best i decided to integrate systemd, remove the heavy webui and SQLite due to problems with node and obsolete npm.
+Built and run on a Raspberry Pi on the Firth of Clyde, Scotland, but the watch
+lists, map centre and bounding boxes are all plain Python constants you can edit
+for your own area.
 
-This simple python script does the work and forwards messages straight to your phone from multimon-ng using the same idea as pagermon but without the server/web front end and message database. 
-
-TL:DR....
-This is a minimal, though pretty reliable bridge from **multimon-ng / rtl_fm** pager decoding to **Gotify push notifications**. Set your desired frequency and rtl-sdr gain in reader.sh and edit pager2gotify.py to add your create new app API and add filters (if you want) You may install the open source 'gotify' app via Obtainium for firsthand updates.
-
-Designed for **clean, real-world pager monitoring** with mild to aggressive customisable python  filtering to remove junk traffic, indistinct and bad decodes concentrating on what you want to see and be notified of.
-
----
-
-Features
-
-* Customisable Filters setting **POCSAG only** (ignores FLEX completely or whatever your choosing)
-* Supports **baud filtering (e.g. 512 only)**
-* Capcode filtering (e.g. **LPC Birdwatch = ends in `450`**)
-* Removes:
-
-  * test pages
-  * control-character garbage
-  * numeric-only junk
-* Deduplication (prevents spam bursts)
-* Clean notification formatting
-* Runs as a **systemd service**
+> **Project history:** this repository originally hosted *pager2gotify*, a small
+> multimon-ng → Gotify bridge for POCSAG pager traffic. That script grew into this
+> full web dashboard. The old pager decoding code still exists in the source but is
+> currently disabled (search the file for `PAGER DISABLED`). The original script
+> remains available in this repo's git history.
 
 ---
 
-Example Output
+## Features
 
-```
-Mode: POCSAG
-Baud: 512
-Capcode: 993671
+| Tab | What you get |
+|-----|--------------|
+| **AIS** | Live ship map (Leaflet) fed by a local AIS-catcher receiver + AISstream.io community data. SVG ship icons coloured by vessel type, **rotated in real time by true heading (COG fallback)**, age-based fading, permanent name labels with a 3-state toggle (off / auto by zoom / always), fullscreen, satellite & topo layers, aircraft overlay toggle, vessel detail panel with photo + track history. |
+| **ADSB** | Live aircraft from a local readsb/tar1090 receiver merged with community APIs (adsb.fi, adsb.lol, airplanes.live — rotated). tar1090 aircraft silhouettes (91 shape types), detail panel with planespotters.net photo, track history, ship overlay toggle. |
+| **APRS** | Live APRS-IS feed (includes LoRa APRS) for a configurable radius, colour-coded by station type, plus aprs.fi watched-callsign lookup. |
+| **Weather** | Windy embeds (radar / wind / waves / temp / clouds) and live lightning from Blitzortung. |
+| **Tides** | WorldTides-powered tide graph for your configured location. |
+| **Intel** | Persistent history tables of every SAR/military/watched aircraft and vessel seen, row-click opens the detail panel. |
+| **Settings** | Notification toggles, station alert filters, receiver start/stop/restart controls (AIS-catcher & readsb) with feed-health indicators. |
 
-Wiedehopf spotted in shrubs on lake canterton.
-```
+### Alerting (Telegram + Gotify)
 
----
-
-Requirements
-
-* Linux (Raspberry Pi in this example)
-* `rtl_fm` or equivalent SDR input
-* `multimon-ng`
-* Python 3.8+
-
----
-
-Installation
-
-1. Clone repo
-
-```
-git clone https://github.com/bertonumber1/pager2gotify.git
-cd pager2gotify
-```
+- Watched MMSIs / vessel-name keywords (e.g. lifeboats, coastguard, police)
+- SAR / military / law-enforcement aircraft (callsign, registration, squawk,
+  ICAO type and military hex-range matching against the local tar1090 DB)
+- **Distress**: AIS-SART / MOB / EPIRB beacons (MMSI 970/972/974) and emergency
+  squawks 7500 / 7600 / 7700 — top priority
+- **SAR co-location**: an SAR vessel and SAR aircraft within 15 nm of each other
+- Watchdog: alerts when the AIS feed disconnects or ADS-B data goes stale, and
+  again on recovery
 
 ---
 
-### 2. Configure script
+## Requirements
 
-Edit:
+**Hardware / feeds** (the dashboard consumes these, it does not decode RF itself):
 
-```
-pager2gotify.py (sudo nano pager2gotify.py)
-```
+- An AIS receiver running [AIS-catcher](https://github.com/jvde-github/AIS-catcher)
+  with its web server enabled (SSE feed on `http://localhost:8100/api/sse`)
+- An ADS-B receiver running [readsb](https://github.com/wiedehopf/readsb) +
+  [tar1090](https://github.com/wiedehopf/tar1090) (reads `/run/readsb/aircraft.json`
+  and the tar1090 aircraft database)
+- Optional: [Gotify](https://gotify.net/) server for push notifications
 
-Set your Gotify server:
+Either receiver is optional — tabs for missing feeds simply stay empty.
+Community feeds (AISstream, adsb.fi/lol/airplanes.live) still work without any
+local hardware.
 
-```python
-GOTIFY_URL = "http://YOUR_SERVER_IP:8088"
-GOTIFY_TOKEN = "YOUR_GOTIFY_APP_TOKEN"
-```
-
----
-
-3. Make executable
-
-```
-chmod +x pager2gotify.py
-```
+**Software**: Linux, Python 3.9+, and the packages in `requirements.txt`.
 
 ---
 
-4. Create reader script:
-rename reader.sh.example to reader.sh (sudo mv reader.sh.example reader.sh then edit with sudo nano reader.sh)
-
-Example:
+## Installation
 
 ```bash
-rtl_fm -f 153.050M -M fm -s 22050 -g 40 - | \
-multimon-ng -a POCSAG512 -f alpha - | \
-/path/to/pager2gotify.py
+git clone https://github.com/bertonumber1/pager2gotify.git ais-adsb-dashboard
+cd ais-adsb-dashboard
+pip3 install -r requirements.txt        # on Debian/RPi OS add: --break-system-packages
 ```
 
----
+### 1. Configure credentials — `secrets.json`
 
-5. Create systemd service
-
-```
-sudo nano /etc/systemd/system/pager2gotify.service
-```
-
-```ini
-[Unit]
-Description=Pager2Gotify
-After=network.target
-
-[Service]
-User=YOUR_USERNAME
-ExecStart=/bin/bash /path/to/reader.sh
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
+```bash
+cp secrets.example.json secrets.json
+nano secrets.json
 ```
 
----
+| Key | What it is | Where to get it |
+|-----|------------|-----------------|
+| `telegram_bot_token` | Telegram bot API token | [@BotFather](https://t.me/BotFather) |
+| `telegram_chat_id` | Chat ID the bot posts to | message the bot, then `https://api.telegram.org/bot<TOKEN>/getUpdates` |
+| `gotify_url` / `gotify_token` | Your Gotify server + app token | Gotify web UI → Apps |
+| `worldtides_key` | Tides API key (free tier is plenty) | [worldtides.info/developer](https://www.worldtides.info/developer) |
+| `aisstream_key` | Community AIS WebSocket feed | [aisstream.io](https://aisstream.io/) (free) |
+| `aprs_fi_key` | aprs.fi API key for watched callsigns | [aprs.fi → My account](https://aprs.fi/) |
+| `aprs_callsign` | Your amateur callsign for the APRS-IS login | your licence |
+| `remote_decoder_*` | SSH details of an optional remote pager-SDR Pi | leave blank (pager code is disabled) |
 
-6. Enable + start
+Leave any key you don't use as an empty string — the related feature just stays off.
+`secrets.json` is gitignored so your credentials never end up in a commit.
 
+### 2. Localise it
+
+All location-specific data lives in constants near the top of
+`rnli_ais_adsb_dashboard.py`:
+
+- `TIDE_LAT` / `TIDE_LON` — tide location
+- `AISSTREAM_BOX` — AIS community bounding box
+- `CFG mapLat/mapLon` (search `_CFG_JS`) — map centre
+- `AIS_MMSI_RULES` / `AIS_NAME_RULES` — watched vessels
+- `RNLI_STATION_MAP` — lifeboat stations (Scotland by default)
+- `_APRS_FILTER` — APRS-IS radius filter
+
+### 3. Run it
+
+```bash
+python3 rnli_ais_adsb_dashboard.py
 ```
+
+Open `http://<pi-ip>:8083`. Settings are saved to `settings.json`, incidents and
+intel to `incidents.db` (SQLite), photos are cached in `photos/`.
+
+### 4. Run as a service
+
+```bash
+sudo cp rnli.service.example /etc/systemd/system/ais-dashboard.service
+sudo nano /etc/systemd/system/ais-dashboard.service   # fix User= and the two paths
 sudo systemctl daemon-reload
-sudo systemctl enable pager2gotify
-sudo systemctl start pager2gotify
+sudo systemctl enable --now ais-dashboard.service
+journalctl -u ais-dashboard -f
 ```
 
----
-
-7. Check logs
-
-```
-journalctl -u pager2gotify -n 50 --no-pager
-```
+> The receiver start/stop buttons in the Settings tab run
+> `sudo -n systemctl <start|stop|restart> ais-catcher/readsb` — they need a
+> passwordless sudo rule for the service user, or just ignore those buttons.
 
 ---
 
-Default Filtering Logic (example filter)
+## API
 
-Allowed:
+Everything the UI uses is plain JSON + one SSE stream:
 
-* POCSAG
-* Baud: 512
-* Capcode ends with `450`
-
-Blocked:
-
-* FLEX
-* POCSAG1200 / 2400
-* test pages
-* control-character garbage
-* numeric-only messages
-
----
-
-Customisation
-
-You can modify:
-
-```python
-ALLOW_BAUD = "512"
-ALLOW_SUFFIX = "450"
-```
-
-Examples:
-
-Allow multiple suffixes:
-
-```python
-ALLOW_SUFFIXES = {"450", "451", "452"}
-```
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/events` | SSE stream — vessels, aircraft, APRS stations, alerts |
+| `GET /api/ais/vessels` | All live vessels |
+| `GET /api/ais/track/{mmsi}` | Vessel position history |
+| `GET /api/ais/intel` | Vessel intelligence history |
+| `GET /api/adsb/aircraft` | All tracked aircraft (local + community) |
+| `GET /api/adsb/track/{hex}` | Aircraft position history |
+| `GET /api/adsb/intel` | Aircraft intelligence history |
+| `GET /api/aprs/stations` | Live APRS-IS stations |
+| `GET /api/receivers` | AIS/ADS-B receiver service status + feed health |
+| `GET /api/tides` | Cached tide data |
 
 ---
 
-Why Gotify?
+## Architecture notes
 
-* Self-hosted
-* No Google dependency
-* Instant push
-* Simple HTTP API
-* Open source app
+- **One file.** Backend (FastAPI), background reader threads and the entire
+  frontend (HTML/CSS/JS served as one page) live in
+  `rnli_ais_adsb_dashboard.py`. Leaflet is vendored locally so the dashboard
+  works without internet for map interaction (tiles still need connectivity).
+- Background threads follow a common pattern: daemon thread → parse feed →
+  update in-memory dict under a lock → throttled SSE broadcast → SQLite for
+  anything historical.
+- SSE bursts are debounced client-side and marker icons are signature-cached,
+  so ~700 live markers stay smooth on a Pi-served page.
+- If you edit the embedded JS, validate it afterwards:
+  extract the `<script>` blocks and run `node --check` — a Python string escape
+  like `\x` inside the HTML string will silently corrupt the page.
 
----
+## License
 
-Disclaimer
-
-Use only on frequencies you are licensed or permitted to monitor. This is a simple python based project i wrote myself. I thought i would upload it with the help of chatgpt as i have never used github before. Full kudos is with multimon-ng and the gotify devs. Thanks 
-
----
-
-License
-
-MIT
+MIT — see [LICENSE](LICENSE).

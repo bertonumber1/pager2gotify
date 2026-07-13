@@ -1,5 +1,6 @@
+secrets.json
+incidents.db*
+*.log
 __pycache__/
-*.pyc
-.env
-venv/
-.venv/
+*.bak*
+photos/
