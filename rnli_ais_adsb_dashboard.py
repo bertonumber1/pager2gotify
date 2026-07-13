@@ -4,7 +4,6 @@
 import asyncio, json, logging, math, os, re, shutil, signal, socket
 import sqlite3, subprocess, sys, threading, time, urllib.parse, urllib.request
 import cloudscraper as _cloudscraper
-import paramiko as _paramiko
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -51,279 +50,10 @@ TIDE_CACHE_SECS = 6 * 3600    # re-fetch no more than every 6 hours
 
 # ── default settings (overridable from web UI → saved to settings.json) ───────
 _DEFAULTS = {
-    "freq":             "153.075M",
-    "gain":             "32.8",
-    "baud":             "POCSAG512",
-    "device":           "0",
-    "sample_rate":      "22050",
     "telegram_enabled": True,
     "gotify_enabled":   True,
-    "allowed_stations": ["F01","F02","F03","F04","F05","F20"],
-    "dedup_seconds":    60,
-    "autostart":        False,
 }
 
-# ── station data ───────────────────────────────────────────────────────────────
-# Known stations with full profiles — grouped by LSO area.
-# Unknown codes decoded from traffic appear in Settings as "Discovered" and can be enabled.
-STATION_MAP = {
-    # Inverclyde / Renfrewshire
-    "F01": {"station": "Greenock",        "area": "Renfrewshire & Inverclyde"},
-    "F02": {"station": "Port Glasgow",    "area": "Renfrewshire & Inverclyde"},
-    "F03": {"station": "Johnstone",       "area": "Renfrewshire & Inverclyde"},
-    "F04": {"station": "Paisley",         "area": "Renfrewshire & Inverclyde"},
-    "F05": {"station": "Renfrew",         "area": "Renfrewshire & Inverclyde"},
-    "F06": {"station": "Bishopton",       "area": "Renfrewshire & Inverclyde"},
-    "F07": {"station": "Kilmacolm",       "area": "Renfrewshire & Inverclyde"},
-    "F08": {"station": "Lochwinnoch",     "area": "Renfrewshire & Inverclyde"},
-    "F09": {"station": "Barrhead",        "area": "Renfrewshire & Inverclyde"},
-    "F10": {"station": "Neilston",        "area": "Renfrewshire & Inverclyde"},
-    "F20": {"station": "Gourock",         "area": "Renfrewshire & Inverclyde"},
-    # Glasgow City
-    "F11": {"station": "Glasgow Central", "area": "Glasgow City"},
-    "F12": {"station": "Maryhill",        "area": "Glasgow City"},
-    "F13": {"station": "Parkhead",        "area": "Glasgow City"},
-    "F14": {"station": "Govan",           "area": "Glasgow City"},
-    "F15": {"station": "Polmadie",        "area": "Glasgow City"},
-    "F16": {"station": "Knightswood",     "area": "Glasgow City"},
-    "F17": {"station": "Springburn",      "area": "Glasgow City"},
-    "F18": {"station": "Possil",          "area": "Glasgow City"},
-    "F19": {"station": "Castlemilk",      "area": "Glasgow City"},
-    # Dunbartonshire
-    "F21": {"station": "Dumbarton",       "area": "Dunbartonshire"},
-    "F22": {"station": "Clydebank",       "area": "Dunbartonshire"},
-    "F23": {"station": "Bearsden",        "area": "Dunbartonshire"},
-    "F24": {"station": "Kirkintilloch",   "area": "Dunbartonshire"},
-    "F25": {"station": "Alexandria",      "area": "Dunbartonshire"},
-    "F26": {"station": "Helensburgh",     "area": "Dunbartonshire"},
-    # Lanarkshire
-    "F30": {"station": "Hamilton",        "area": "Lanarkshire"},
-    "F31": {"station": "Motherwell",      "area": "Lanarkshire"},
-    "F32": {"station": "Wishaw",          "area": "Lanarkshire"},
-    "F33": {"station": "Coatbridge",      "area": "Lanarkshire"},
-    "F34": {"station": "Airdrie",         "area": "Lanarkshire"},
-    "F35": {"station": "Bellshill",       "area": "Lanarkshire"},
-    "F36": {"station": "Blantyre",        "area": "Lanarkshire"},
-    "F37": {"station": "Carluke",         "area": "Lanarkshire"},
-    "F38": {"station": "Larkhall",        "area": "Lanarkshire"},
-    "F39": {"station": "Lanark",          "area": "Lanarkshire"},
-    # Ayrshire
-    "F40": {"station": "Kilmarnock",      "area": "Ayrshire"},
-    "F41": {"station": "Ayr",             "area": "Ayrshire"},
-    "F42": {"station": "Irvine",          "area": "Ayrshire"},
-    "F43": {"station": "Ardrossan",       "area": "Ayrshire"},
-    "F44": {"station": "Largs",           "area": "Ayrshire"},
-    "F45": {"station": "Troon",           "area": "Ayrshire"},
-    "F46": {"station": "Cumnock",         "area": "Ayrshire"},
-    "F47": {"station": "Saltcoats",       "area": "Ayrshire"},
-    # Argyll & Bute
-    "F50": {"station": "Oban",            "area": "Argyll & Bute"},
-    "F51": {"station": "Campbeltown",     "area": "Argyll & Bute"},
-    "F52": {"station": "Dunoon",          "area": "Argyll & Bute"},
-    "F53": {"station": "Inveraray",       "area": "Argyll & Bute"},
-    "F54": {"station": "Lochgilphead",    "area": "Argyll & Bute"},
-}
-
-STATION_PROFILE = {
-    "Greenock":     {"Pumps":3,"TFC":"No", "NFR":"Yes","OSC":"Yes","Council":"Inverclyde"},
-    "Port Glasgow": {"Pumps":2,"TFC":"No", "NFR":"Yes","OSC":"No", "Council":"Inverclyde"},
-    "Johnstone":    {"Pumps":2,"TFC":"No", "NFR":"No", "OSC":"Yes","Council":"Renfrewshire"},
-    "Paisley":      {"Pumps":2,"TFC":"No", "NFR":"Yes","OSC":"Yes","Council":"Renfrewshire"},
-    "Renfrew":      {"Pumps":1,"TFC":"No", "NFR":"Yes","OSC":"Yes","Council":"Renfrewshire"},
-    "Gourock":      {"Pumps":1,"TFC":"Yes","NFR":"No", "OSC":"No", "Council":"Inverclyde"},
-}
-
-# Area → colour palette (for known stations without individual colours)
-AREA_COLORS = {
-    "Renfrewshire & Inverclyde": "#ef4444",
-    "Glasgow City":              "#f97316",
-    "Dunbartonshire":            "#eab308",
-    "Lanarkshire":               "#22c55e",
-    "Ayrshire":                  "#3b82f6",
-    "Argyll & Bute":             "#a855f7",
-}
-
-STATION_COLORS = {
-    "Greenock":"#ef4444","Port Glasgow":"#f97316","Johnstone":"#eab308",
-    "Paisley":"#22c55e","Renfrew":"#3b82f6","Gourock":"#a855f7",
-}
-
-# ── RNLI station intelligence database ─────────────────────────────────────────
-# Scottish RNLI lifeboat stations.  id = RNLI internal station number (from pager
-# capcode: 10{id:03d}{suffix}).  boats: ALB=all-weather, ILB=inshore.
-RNLI_STATION_MAP: dict = {
-    # Firth of Clyde & SW Scotland
-    "Helensburgh":      {"id": 85,  "region": "Clyde",    "council": "Argyll & Bute",       "lat": 56.0045, "lon": -4.7335, "boats": "Atlantic 85 ILB"},
-    "Largs":            {"id": 105, "region": "Clyde",    "council": "North Ayrshire",      "lat": 55.7943, "lon": -4.8694, "boats": "D-class ILB"},
-    "Arran":            {"id": 16,  "region": "Clyde",    "council": "North Ayrshire",      "lat": 55.5333, "lon": -5.1000, "boats": "Atlantic 85 ILB"},
-    "Troon":            {"id": 206, "region": "Clyde",    "council": "South Ayrshire",      "lat": 55.5440, "lon": -4.6787, "boats": "Shannon ALB + D-class ILB"},
-    "Girvan":           {"id": 78,  "region": "Clyde",    "council": "South Ayrshire",      "lat": 55.2390, "lon": -4.8647, "boats": "D-class ILB"},
-    "Campbeltown":      {"id": 42,  "region": "West",     "council": "Argyll & Bute",       "lat": 55.4267, "lon": -5.5986, "boats": "D-class ILB"},
-    "Tighnabruaich":    {"id": 201, "region": "Clyde",    "council": "Argyll & Bute",       "lat": 55.9211, "lon": -5.2226, "boats": "D-class ILB"},
-    "Portpatrick":      {"id": 153, "region": "SW",       "council": "Dumfries & Galloway", "lat": 54.8433, "lon": -5.1175, "boats": "D-class ILB"},
-    "Stranraer":        {"id": 190, "region": "SW",       "council": "Dumfries & Galloway", "lat": 54.9031, "lon": -5.0300, "boats": "D-class ILB"},
-    "Kirkcudbright":    {"id": 102, "region": "SW",       "council": "Dumfries & Galloway", "lat": 54.8359, "lon": -4.0572, "boats": "Atlantic 85 ILB"},
-    # Argyll & Islands
-    "Oban":             {"id": 137, "region": "West",     "council": "Argyll & Bute",       "lat": 56.4135, "lon": -5.4720, "boats": "Tamar ALB + D-class ILB"},
-    "Tobermory":        {"id": 202, "region": "West",     "council": "Argyll & Bute",       "lat": 56.6228, "lon": -6.0683, "boats": "D-class ILB"},
-    "Islay":            {"id": None,"region": "West",     "council": "Argyll & Bute",       "lat": 55.8520, "lon": -6.1060, "boats": "D-class ILB"},
-    "Port Askaig":      {"id": None,"region": "West",     "council": "Argyll & Bute",       "lat": 55.8520, "lon": -6.1060, "boats": "D-class ILB"},
-    "Mallaig":          {"id": 122, "region": "West",     "council": "Highland",            "lat": 57.0074, "lon": -5.8295, "boats": "Tamar ALB"},
-    "Kyle of Lochalsh": {"id": None,"region": "West",     "council": "Highland",            "lat": 57.2743, "lon": -5.7162, "boats": "D-class ILB"},
-    # Skye & NW Highlands
-    "Portree":          {"id": 154, "region": "West",     "council": "Highland",            "lat": 57.4118, "lon": -6.1937, "boats": "Atlantic 85 ILB"},
-    "Barra Island":     {"id": 24,  "region": "West",     "council": "Na h-Eileanan Siar",  "lat": 57.0657, "lon": -7.4852, "boats": "D-class ILB"},
-    "Lochinver":        {"id": None,"region": "North",    "council": "Highland",            "lat": 58.1461, "lon": -5.2466, "boats": "Atlantic 85 ILB"},
-    "Kinlochbervie":    {"id": None,"region": "North",    "council": "Highland",            "lat": 58.4567, "lon": -5.0510, "boats": "Shannon ALB"},
-    # Northern Isles
-    "Stornoway":        {"id": 191, "region": "Islands",  "council": "Na h-Eileanan Siar",  "lat": 58.2092, "lon": -6.3865, "boats": "Shannon ALB"},
-    "Stromness":        {"id": 192, "region": "Orkney",   "council": "Orkney Islands",      "lat": 58.9612, "lon": -3.2993, "boats": "Shannon ALB + D-class ILB"},
-    "Longhope":         {"id": 113, "region": "Orkney",   "council": "Orkney Islands",      "lat": 58.7925, "lon": -3.1949, "boats": "Shannon ALB"},
-    "Lerwick":          {"id": 107, "region": "Shetland", "council": "Shetland Islands",    "lat": 60.1540, "lon": -1.1464, "boats": "Severn ALB"},
-    "Aith":             {"id": 6,   "region": "Shetland", "council": "Shetland Islands",    "lat": 60.2780, "lon": -1.4360, "boats": "Severn ALB"},
-    # North Highlands
-    "Thurso":           {"id": 200, "region": "North",    "council": "Highland",            "lat": 58.5938, "lon": -3.5228, "boats": "Shannon ALB"},
-    "Wick":             {"id": 218, "region": "North",    "council": "Highland",            "lat": 58.4343, "lon": -3.0903, "boats": "Shannon ALB + D-class ILB"},
-    "Invergordon":      {"id": None,"region": "East",     "council": "Highland",            "lat": 57.6847, "lon": -4.1682, "boats": "D-class ILB"},
-    # East Scotland
-    "Buckie":           {"id": 36,  "region": "East",     "council": "Moray",               "lat": 57.6747, "lon": -2.9571, "boats": "D-class ILB"},
-    "Peterhead":        {"id": 142, "region": "East",     "council": "Aberdeenshire",       "lat": 57.5016, "lon": -1.7805, "boats": "Shannon ALB"},
-    "Stonehaven":       {"id": None,"region": "East",     "council": "Aberdeenshire",       "lat": 56.9626, "lon": -2.2094, "boats": "D-class ILB"},
-    "Montrose":         {"id": 127, "region": "East",     "council": "Angus",               "lat": 56.7076, "lon": -2.4694, "boats": "D-class ILB"},
-    "Arbroath":         {"id": 14,  "region": "East",     "council": "Angus",               "lat": 56.5660, "lon": -2.5720, "boats": "Atlantic 85 ILB"},
-    "Broughty Ferry":   {"id": 35,  "region": "East",     "council": "Dundee",              "lat": 56.4639, "lon": -2.8674, "boats": "D-class ILB"},
-    "Anstruther":       {"id": 11,  "region": "East",     "council": "Fife",                "lat": 56.2226, "lon": -2.6995, "boats": "Atlantic 85 ILB"},
-    "Kinghorn":         {"id": 100, "region": "East",     "council": "Fife",                "lat": 56.0711, "lon": -3.1774, "boats": "Atlantic 85 ILB"},
-    "Queensferry":      {"id": 157, "region": "East",     "council": "City of Edinburgh",   "lat": 55.9903, "lon": -3.3998, "boats": "D-class ILB"},
-    "Dunbar":           {"id": None,"region": "East",     "council": "East Lothian",        "lat": 55.9983, "lon": -2.5233, "boats": "D-class ILB"},
-    "St Abbs":          {"id": 180, "region": "East",     "council": "Scottish Borders",    "lat": 55.9017, "lon": -2.1286, "boats": "D-class ILB"},
-}
-
-# Capcode pattern: 10{id:03d}{suffix:02d}   e.g. Helensburgh (id=85) → 1008591, 1008592
-# Key = 3-digit zero-padded RNLI station ID extracted from capcode[2:5].
-# Non-Scottish entries are present so "Unknown station XXX" can be silently identified
-# rather than logged as INTEL.  Scottish entries also exist in RNLI_STATION_MAP.
-# Sources: Transmission1 forum list (138-297 from user) + web research (1-137).
-RNLI_CAPCODE_MAP: dict = {
-    # ── 1-137: web-sourced (Transmission1 forum) ──────────────────────────────
-    "006": "Aith",            # Scotland
-    "011": "Anstruther",      # Scotland
-    "100": "Kinghorn",        # Scotland (Fife) — cOACS 500
-    "102": "Kirkcudbright",   # Scotland (D&G) — cOACS 502
-    "014": "Arbroath",        # Scotland
-    "016": "Arran",           # Scotland (Lamlash)
-    "024": "Barra Island",    # Scotland
-    "035": "Broughty Ferry",  # Scotland
-    "036": "Buckie",          # Scotland
-    "042": "Campbeltown",     # Scotland
-    "078": "Girvan",          # Scotland
-    "085": "Helensburgh",     # Scotland — confirmed live 1008591/1008592
-    "105": "Largs",           # Scotland
-    "107": "Lerwick",         # Scotland
-    "113": "Longhope",        # Scotland
-    "122": "Mallaig",         # Scotland
-    "127": "Montrose",        # Scotland
-    "137": "Oban",            # Scotland
-    # ── 138-297: from Transmission1 list provided by user ─────────────────────
-    "138": "Padstow",         # Swest
-    "139": "Peel",            # Wales
-    "140": "Penarth",         # Wales
-    "141": "Penlee",          # Swest
-    "142": "Peterhead",       # Scotland
-    "143": "Plymouth",        # Swest
-    "144": "Poole",           # Swest
-    "145": "Port Erin",       # Wales
-    "146": "Port Isaac",      # Swest
-    "147": "Port St Mary",    # Wales
-    "148": "Port Talbot",     # Wales
-    "149": "Portrush",        # Nireland
-    "150": "Portaferry",      # Nireland
-    "151": "Porthcawl",       # Wales
-    "152": "Porthdinllaen",   # Wales
-    "153": "Portpatrick",     # Scotland
-    "154": "Portree",         # Scotland
-    "155": "Portsmouth",      # Seast
-    "156": "Pwllheli",        # Wales
-    "157": "Queensferry",     # Scotland
-    "158": "Ramsey",          # Wales
-    "159": "Ramsgate",        # Seast
-    "160": "Red Bay",         # Nireland
-    "161": "Redcar",          # North
-    "162": "Rhyl",            # Wales
-    "163": "Rock",            # Swest
-    "164": "Rosslare",        # Ireland
-    "165": "Rye Harbour",     # Seast
-    "166": "Salcombe",        # Swest
-    "167": "Scarborough",     # North
-    "168": "Seahouses",       # North
-    "169": "Selsey",          # Seast
-    "170": "Sennen Cove",     # Swest
-    "171": "Sheerness",       # Seast
-    "172": "Sheringham",      # Eastern
-    "173": "Shoreham",        # Seast
-    "174": "Siloth",          # North
-    "175": "Skegness",        # North
-    "176": "Skerries",        # Ireland
-    "177": "Sligo Bay",       # Ireland
-    "178": "Southend-on-Sea", # Eastern
-    "179": "Southwold",       # Eastern
-    "180": "St Abbs",         # Scotland
-    "181": "St Agnes",        # Swest
-    "182": "St Bees",         # North
-    "183": "St Catherine",    # Swest
-    "184": "St Davids",       # Wales
-    "185": "St Helier",       # Swest
-    "186": "St Ives",         # Swest
-    "187": "St Mary's",       # Swest
-    "188": "St Peter Port",   # Swest
-    "189": "Staithes & Runswick", # North
-    "190": "Stranraer",       # Scotland
-    "191": "Stornoway",       # Scotland
-    "192": "Stromness",       # Scotland
-    "193": "Sunderland",      # North
-    "194": "Swanage",         # Swest
-    "195": "Teesmouth",       # North
-    "196": "Teignmouth",      # Swest
-    "197": "Tenby",           # Wales
-    "198": "The Lizard",      # Swest
-    "199": "The Mumbles",     # Wales
-    "200": "Thurso",          # Scotland
-    "201": "Tighnabruaich",   # Scotland
-    "202": "Tobermory",       # Scotland
-    "203": "Torbay",          # Swest
-    "204": "Tramore",         # Ireland
-    "205": "Trearddur Bay",   # Wales
-    "206": "Troon",           # Scotland
-    "207": "Tynemouth",       # North
-    "208": "Valentia",        # Ireland
-    "209": "Walmer",          # Seast
-    "210": "Walton/Frinton",  # Eastern
-    "211": "Wells",           # Eastern
-    "212": "West Kirby",      # North
-    "213": "West Mersea",     # Eastern
-    "214": "Weston-super-Mare", # Swest
-    "215": "Weymouth",        # Swest
-    "216": "Whitby",          # North
-    "217": "Whitstable",      # Seast
-    "218": "Wick",            # Scotland
-    "219": "Wicklow",         # Ireland
-    "220": "Withernsea",      # North
-    "221": "Workington",      # North
-    "222": "Yarmouth",        # Seast
-    "223": "Youghal",         # Ireland
-    "225": "Tower",           # London
-    "226": "Chiswick",        # London
-    "227": "Gravesend",       # London
-    "228": "Crosshaven",      # Ireland
-    "288": "Lough Derg",      # Ireland
-    "290": "Wexford",         # Ireland
-    "291": "Burnham-on-Sea",  # Swest
-    "293": "Enniskillen",     # Nireland
-    "294": "South Broads",    # Eastern
-    "295": "Teddington",      # London
-    "297": "Kinsale",         # Ireland
-}
-_RNLI_MAX_STATION_ID = 297   # RNLI station IDs above this are NOT lifeboat stations
 
 # ── AIS watch rules (mirrors ais_watch.py) ─────────────────────────────────────
 AIS_SSE_URL          = "http://localhost:8100/api/sse"
@@ -475,14 +205,6 @@ ADSB_LABEL_COLORS = {
     "Emergency":               "#ff0000",
 }
 
-# ── regexes ────────────────────────────────────────────────────────────────────
-_POCSAG_RE  = re.compile(
-    r'^POCSAG(?P<speed>\d+):\s*Address:\s*(?P<addr>\d+)\s*Function:\s*(?P<func>\d+)'
-    r'(?:\s*(?P<kind>Alpha|Numeric):\s*(?P<msg>.*))?\s*$'
-)
-_INCIDENT_RE = re.compile(r'^(?P<sc>[BCDEF]\d{2})(?P<ap>P\d)\b')
-_GRID_RE     = re.compile(r'\b([A-Z]{2})\s+(\d{5})\s+(\d{5})\b')
-
 # ── settings ───────────────────────────────────────────────────────────────────
 def _load_cfg() -> dict:
     s = dict(_DEFAULTS)
@@ -514,41 +236,29 @@ def _setup_logging():
     logging.getLogger("uvicorn.access").propagate = False
 
 _setup_logging()
-log = logging.getLogger("pager-monitor")
+log = logging.getLogger("dashboard")
 
 # ── DB ─────────────────────────────────────────────────────────────────────────
-def _db() -> sqlite3.Connection:
+from contextlib import contextmanager
+
+@contextmanager
+def _db():
+    """Yield a connection that commits on success, rolls back on error, and
+    ALWAYS closes — leaked connections held stale read snapshots and caused
+    'database table is locked' during track cleanup."""
     c = sqlite3.connect(_DB_PATH, check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA busy_timeout=5000")  # wait for concurrent writers instead of erroring
-    return c
+    try:
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")  # wait for concurrent writers instead of erroring
+        with c:      # transaction: commit / rollback
+            yield c
+    finally:
+        c.close()
 
 def _init_db():
     with _db() as c:
         c.executescript("""
         PRAGMA journal_mode=WAL;
-        CREATE TABLE IF NOT EXISTS incidents (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts            INTEGER NOT NULL,
-            addr          TEXT,
-            speed         TEXT,
-            func          TEXT,
-            kind          TEXT,
-            raw_msg       TEXT,
-            station_code  TEXT,
-            station       TEXT,
-            appliance     TEXT,
-            incident_code TEXT,
-            council       TEXT,
-            gridref       TEXT,
-            lat           REAL,
-            lon           REAL,
-            map_url       TEXT,
-            telegram_sent INTEGER DEFAULT 0,
-            gotify_sent   INTEGER DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS idx_ts      ON incidents(ts DESC);
-        CREATE INDEX IF NOT EXISTS idx_station ON incidents(station_code);
         CREATE TABLE IF NOT EXISTS ais_track (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
             mmsi    INTEGER NOT NULL,
@@ -619,61 +329,6 @@ def _init_db():
         """)
 
 _init_db()
-
-# ── OSGB36 → WGS84 ─────────────────────────────────────────────────────────────
-def _grid_100km(letters):
-    A = "ABCDEFGHJKLMNOPQRSTUVWXYZ"
-    l1, l2 = letters[0].upper(), letters[1].upper()
-    if l1 not in A or l2 not in A: return None
-    i1, i2 = A.index(l1), A.index(l2)
-    e = ((i1-2)%5)*5 + (i2%5)
-    n = (19-(i1//5)*5) - (i2//5)
-    return (e, n) if n >= 0 else None
-
-def _osgb_wgs84(easting, northing):
-    a,b = 6377563.396,6356256.909
-    F0,lat0,lon0,N0,E0 = 0.9996012717,math.radians(49),math.radians(-2),-100000,400000
-    e2 = 1-(b*b)/(a*a); n = (a-b)/(a+b)
-    lat = lat0; M = 0.0
-    while True:
-        lp = lat
-        lat = (northing-N0-M)/(a*F0)+lat
-        Ma = (1+n+(5/4)*n**2+(5/4)*n**3)*(lat-lat0)
-        Mb = (3*n+3*n**2+(21/8)*n**3)*math.sin(lat-lat0)*math.cos(lat+lat0)
-        Mc = ((15/8)*n**2+(15/8)*n**3)*math.sin(2*(lat-lat0))*math.cos(2*(lat+lat0))
-        Md = (35/24)*n**3*math.sin(3*(lat-lat0))*math.cos(3*(lat+lat0))
-        M  = b*F0*(Ma-Mb+Mc-Md)
-        if abs(lat-lp)<1e-10: break
-    sl,cl,tl = math.sin(lat),math.cos(lat),math.tan(lat)
-    nu  = a*F0/math.sqrt(1-e2*sl**2)
-    rho = a*F0*(1-e2)/(1-e2*sl**2)**1.5
-    eta2 = nu/rho-1; dE = easting-E0
-    la = lat - (tl/(2*rho*nu))*dE**2 + (tl/(24*rho*nu**3))*(5+3*tl**2+eta2-9*tl**2*eta2)*dE**4 \
-             - (tl/(720*rho*nu**5))*(61+90*tl**2+45*tl**4)*dE**6
-    lo = lon0 + (1/(cl*nu))*dE - (1/(6*cl*nu**3))*(nu/rho+2*tl**2)*dE**3 \
-              + (1/(120*cl*nu**5))*(5+28*tl**2+24*tl**4)*dE**5 \
-              - (1/(5040*cl*nu**7))*(61+662*tl**2+1320*tl**4+720*tl**6)*dE**7
-    a1,b1 = 6377563.396,6356256.909; e2_1 = 1-(b1*b1)/(a1*a1)
-    v  = a1/math.sqrt(1-e2_1*math.sin(la)**2)
-    x1 = v*math.cos(la)*math.cos(lo); y1 = v*math.cos(la)*math.sin(lo)
-    z1 = (1-e2_1)*v*math.sin(la)
-    tx,ty,tz,s = 446.448,-125.157,542.060,20.4894e-6
-    rx,ry,rz = math.radians(0.1502/3600),math.radians(0.2470/3600),math.radians(0.8421/3600)
-    x2 = tx+(1+s)*x1-rz*y1+ry*z1; y2 = ty+rz*x1+(1+s)*y1-rx*z1; z2 = tz-ry*x1+rx*y1+(1+s)*z1
-    a2,b2 = 6378137.0,6356752.3141; e2_2 = 1-(b2*b2)/(a2*a2)
-    lon_w = math.atan2(y2,x2); p = math.sqrt(x2*x2+y2*y2)
-    lat_w = math.atan2(z2,p*(1-e2_2))
-    while True:
-        lp = lat_w; v = a2/math.sqrt(1-e2_2*math.sin(lat_w)**2)
-        lat_w = math.atan2(z2+e2_2*v*math.sin(lat_w),p)
-        if abs(lat_w-lp)<1e-12: break
-    return math.degrees(lat_w), math.degrees(lon_w)
-
-def _gridref_latlon(g, e_str, n_str):
-    base = _grid_100km(g)
-    if not base: return None
-    try: return _osgb_wgs84(base[0]*100000+int(e_str), base[1]*100000+int(n_str))
-    except Exception: return None
 
 def _haversine_nm(lat1, lon1, lat2, lon2) -> float:
     R = 3440.065
@@ -912,7 +567,7 @@ def _shipspotting_photo(ship_name: str) -> str | None:
         return None
 
 # ── Planespotters.net photo API ────────────────────────────────────────────────
-_PS_UA = "PagerAISWeb/1.0 (+mailto:adsbgreenock@gmail.com)"
+_PS_UA = "AisAdsbDashboard/1.0 (+mailto:adsbgreenock@gmail.com)"
 
 def _planespotters_photo(hex_code: str, reg: str = "") -> tuple:
     """Return (photo_url, thumb_url) from planespotters.net, or (None, None). Never raises."""
@@ -1308,14 +963,22 @@ def _ais_track_store(mmsi: int, lat: float, lon: float, speed, heading):
 def _ais_track_cleanup():
     """Delete track points older than TTL; run periodically."""
     cutoff = int(time.time()) - AIS_TRACK_TTL_DAYS * 86400
-    try:
-        with _db() as c:
-            deleted = c.execute("DELETE FROM ais_track WHERE ts < ?", (cutoff,)).rowcount
+    for attempt in range(3):
+        try:
+            with _db() as c:
+                deleted = c.execute("DELETE FROM ais_track WHERE ts < ?", (cutoff,)).rowcount
             if deleted:
-                c.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                # checkpoint AFTER commit — inside the DELETE's transaction it
+                # fails with "database table is locked" (the old 6-hourly warning)
+                with _db() as c:
+                    c.execute("PRAGMA wal_checkpoint(PASSIVE)")
                 log.info(f"AIS track cleanup: removed {deleted} old points")
-    except Exception as e:
-        log.warning(f"AIS track cleanup error: {e}")
+            return
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(30)
+            else:
+                log.warning(f"AIS track cleanup error: {e}")
 
 def _ais_vessel_expiry():
     """Background thread: remove vessels silent for >AIS_VESSEL_TTL seconds."""
@@ -1336,7 +999,10 @@ def _ais_vessel_expiry():
 threading.Thread(target=_ais_vessel_expiry, daemon=True).start()
 
 def _ais_cleanup_loop():
-    """Background thread: cleanup once at startup then every 6 hours."""
+    """Background thread: cleanup shortly after startup then every 6 hours."""
+    # let _init_db DDL and thread startup settle — first-run DELETE used to race
+    # them and die with SQLITE_LOCKED ("database table is locked")
+    time.sleep(60)
     _ais_track_cleanup()
     while True:
         time.sleep(6 * 3600)
@@ -1552,49 +1218,6 @@ def _ais_reader():
                         "count": len(_ais_vessels)})
             time.sleep(15)
 
-# ── parsing ────────────────────────────────────────────────────────────────────
-def _clean(msg):
-    return re.sub(r'\s+',' ',(msg or "").replace("\r"," ").replace("\n"," ")
-                  .replace("\x00"," ").replace("<NUL>"," ").strip())
-
-def _parse_line(line: str) -> Optional[dict]:
-    m = _POCSAG_RE.search(line.strip())
-    if not m: return None
-    addr  = m.group("addr").strip()
-    speed = m.group("speed").strip()
-    if speed != "512" or not addr.isdigit() or len(addr) < 6: return None
-    func = m.group("func").strip()
-    kind = (m.group("kind") or "Unknown").strip()
-    msg  = _clean(m.group("msg") or "")
-    im   = _INCIDENT_RE.match(msg)
-    if not im: return None
-    sc   = im.group("sc")
-    appl = im.group("ap")
-    info = STATION_MAP.get(sc)
-    station_name = info["station"] if info else sc          # fallback to raw code
-    area         = info.get("area","Unknown") if info else "Unknown"
-    prof = STATION_PROFILE.get(station_name, {})
-    color = (STATION_COLORS.get(station_name)
-             or AREA_COLORS.get(area, "#888"))
-    is_allowed = sc in cfg.get("allowed_stations", [])
-    gridref = lat = lon = map_url = None
-    gm = _GRID_RE.search(msg)
-    if gm:
-        gridref = f"{gm.group(1)} {gm.group(2)} {gm.group(3)}"
-        ll = _gridref_latlon(gm.group(1), gm.group(2), gm.group(3))
-        if ll:
-            lat, lon = ll
-            map_url = (f"https://www.openstreetmap.org/?mlat={lat:.6f}&mlon={lon:.6f}"
-                       f"#map=16/{lat:.6f}/{lon:.6f}")
-    return {
-        "ts": int(time.time()), "addr": addr, "speed": speed, "func": func,
-        "kind": kind, "raw_msg": msg, "station_code": sc,
-        "station": station_name, "area": area, "appliance": appl,
-        "incident_code": f"{sc}{appl}", "council": prof.get("Council",""),
-        "gridref": gridref, "lat": lat, "lon": lon, "map_url": map_url,
-        "color": color, "profile": prof, "is_allowed": is_allowed,
-    }
-
 # ── notifications ──────────────────────────────────────────────────────────────
 def _send_telegram(text):
     if not cfg.get("telegram_enabled"): return
@@ -1635,30 +1258,6 @@ def _send_telegram_photo(caption: str, photo_url: str):
         log.debug(f"Telegram sendPhoto failed ({e}), falling back to sendMessage")
     _send_telegram(caption + f"\n\nPhoto: {photo_url}")
 
-# ── dedup ──────────────────────────────────────────────────────────────────────
-_seen: dict = {}
-
-def _is_dupe(inc: dict) -> bool:
-    now = time.time()
-    for k in [k for k,t in _seen.items() if now-t > cfg.get("dedup_seconds",60)]:
-        del _seen[k]
-    key = f"{inc['addr']}|{inc['raw_msg']}"
-    if key in _seen: return True
-    _seen[key] = now; return False
-
-# ── DB write ───────────────────────────────────────────────────────────────────
-def _save_incident(inc: dict) -> int:
-    with _db() as c:
-        r = c.execute("""
-        INSERT INTO incidents
-            (ts,addr,speed,func,kind,raw_msg,station_code,station,appliance,
-             incident_code,council,gridref,lat,lon,map_url)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (inc["ts"],inc["addr"],inc["speed"],inc["func"],inc["kind"],inc["raw_msg"],
-         inc["station_code"],inc["station"],inc["appliance"],inc["incident_code"],
-         inc["council"],inc["gridref"],inc["lat"],inc["lon"],inc["map_url"]))
-        return r.lastrowid
-
 # ── SSE broadcast ──────────────────────────────────────────────────────────────
 _sse_clients: list = []
 _sse_lock = threading.Lock()
@@ -1671,144 +1270,6 @@ def _broadcast(event: dict):
         for q in list(_sse_clients):
             try: _ev_loop.call_soon_threadsafe(q.put_nowait, data)
             except Exception: pass
-
-# ── remote pager decoder control (SDR is on 192.168.0.147, not this Pi) ────────
-_REMOTE_DEC_HOST    = _SECRETS.get("remote_decoder_host", "")
-_REMOTE_DEC_USER    = _SECRETS.get("remote_decoder_user", "")
-_REMOTE_DEC_PASS    = _SECRETS.get("remote_decoder_pass", "")
-_REMOTE_DEC_SERVICE = "pager2gotify"
-_REMOTE_SERVICE_FILE = "/etc/systemd/system/pager2gotify.service"
-
-_dec_status = "unknown"
-_dec_error  = ""
-_dec_lock   = threading.Lock()
-
-def _status_evt():
-    return {"type":"status","running":_dec_status=="running",
-            "state":_dec_status,"error":_dec_error,
-            "remote":f"{_REMOTE_DEC_HOST} ({_REMOTE_DEC_SERVICE}.service)"}
-
-def _remote_ssh() -> _paramiko.SSHClient:
-    c = _paramiko.SSHClient()
-    c.set_missing_host_key_policy(_paramiko.AutoAddPolicy())
-    c.connect(_REMOTE_DEC_HOST, port=22, username=_REMOTE_DEC_USER,
-              password=_REMOTE_DEC_PASS, timeout=8)
-    return c
-
-def _remote_exec(cmd: str) -> tuple:
-    try:
-        c = _remote_ssh()
-        _, out, err = c.exec_command(cmd, timeout=20)
-        result = out.read().decode().strip(), err.read().decode().strip()
-        c.close()
-        return result
-    except Exception as e:
-        return "", str(e)
-
-def _remote_check_status() -> str:
-    out, _ = _remote_exec(f"systemctl is-active {_REMOTE_DEC_SERVICE}")
-    return "running" if out == "active" else ("stopped" if out in ("inactive","failed","dead") else "unknown")
-
-def _push_remote_settings(new_cfg: dict) -> tuple:
-    """Rewrite remote service ExecStart with updated SDR params via SFTP, then reload."""
-    freq = new_cfg.get("freq", "153.075M")
-    gain = new_cfg.get("gain", "40")
-    baud = new_cfg.get("baud", "POCSAG512")
-    sr   = new_cfg.get("sample_rate", "22050")
-    svc  = (
-        "[Unit]\n"
-        "Description=Pager decoder to Gotify\n"
-        "After=network-online.target\n"
-        "Wants=network-online.target\n\n"
-        "[Service]\n"
-        "Type=simple\n"
-        "User=root\n"
-        "WorkingDirectory=/root/pager2gotify\n"
-        f"ExecStart=/bin/bash -c '/usr/bin/rtl_fm -d 0 -M fm -f {freq} -s {sr} -g {gain} -l 0 "
-        f"| /usr/bin/multimon-ng -t raw -a {baud} -f alpha - "
-        f"| /usr/bin/python3 /root/pager2gotify/pager2gotify.py'\n"
-        "Restart=always\n"
-        "RestartSec=3\n"
-        "StandardOutput=journal\n"
-        "StandardError=journal\n\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
-    )
-    try:
-        c = _remote_ssh()
-        sftp = c.open_sftp()
-        with sftp.open(_REMOTE_SERVICE_FILE, "w") as f:
-            f.write(svc)
-        sftp.close()
-        _, out, err = c.exec_command(
-            f"systemctl daemon-reload && systemctl restart {_REMOTE_DEC_SERVICE} && echo ok",
-            timeout=20)
-        ok_text = out.read().decode()
-        err_text = err.read().decode()
-        c.close()
-        return "ok" in ok_text, err_text
-    except Exception as e:
-        return False, str(e)
-
-def start_decoder():
-    global _dec_status, _dec_error
-    with _dec_lock:
-        _dec_status = "starting"; _dec_error = ""
-        _broadcast(_status_evt())
-        out, err = _remote_exec(f"systemctl start {_REMOTE_DEC_SERVICE} && echo ok")
-        if "ok" in out:
-            _dec_status = "running"
-            log.info(f"Remote decoder started on {_REMOTE_DEC_HOST}")
-        else:
-            _dec_status = "error"
-            _dec_error  = err or "Failed to start remote decoder"
-            log.warning(f"Remote decoder start failed: {_dec_error}")
-        _broadcast(_status_evt())
-        return {"ok": _dec_status == "running", "error": _dec_error}
-
-def stop_decoder():
-    global _dec_status
-    with _dec_lock:
-        _remote_exec(f"systemctl stop {_REMOTE_DEC_SERVICE}")
-        _dec_status = "stopped"; _dec_error = ""
-        _broadcast(_status_evt())
-        log.info("Remote decoder stopped by user")
-        return {"ok": True}
-
-def reset_decoder():
-    global _dec_status, _dec_error
-    with _dec_lock:
-        _dec_status = "starting"; _dec_error = ""
-        _broadcast(_status_evt())
-        out, err = _remote_exec(f"systemctl restart {_REMOTE_DEC_SERVICE} && echo ok")
-        if "ok" in out:
-            _dec_status = "running"
-            log.info(f"Remote decoder restarted on {_REMOTE_DEC_HOST}")
-        else:
-            _dec_status = "error"
-            _dec_error  = err or "Restart failed"
-        _broadcast(_status_evt())
-        return {"ok": _dec_status == "running", "error": _dec_error}
-
-def _remote_status_sync():
-    """Background thread: sync _dec_status with actual remote service state every 60s."""
-    global _dec_status, _dec_error
-    # Initial check on startup
-    time.sleep(2)
-    s = _remote_check_status()
-    with _dec_lock:
-        _dec_status = s; _dec_error = "" if s != "unknown" else "Cannot reach remote Pi"
-    _broadcast(_status_evt())
-    log.info(f"Remote decoder status: {s} ({_REMOTE_DEC_HOST})")
-    while True:
-        time.sleep(60)
-        s = _remote_check_status()
-        with _dec_lock:
-            if s != _dec_status:
-                _dec_status = s
-                _dec_error  = "" if s != "unknown" else "Cannot reach remote Pi"
-                _broadcast(_status_evt())
-                log.info(f"Remote decoder status changed: {s}")
 
 # ── FastAPI ────────────────────────────────────────────────────────────────────
 def _process_aisstream_msg(msg: dict):
@@ -2033,17 +1494,23 @@ def _adsb_track_store(hex_code: str, lat: float, lon: float,
 
 def _adsb_track_cleanup():
     cutoff = int(time.time()) - ADSB_TRACK_TTL_DAYS * 86400
-    try:
-        with _db() as c:
-            deleted = c.execute(
-                "DELETE FROM adsb_track WHERE ts < ?", (cutoff,)
-            ).rowcount
-            if deleted:
-                log.info(f"ADS-B track cleanup: removed {deleted} old points")
-    except Exception as e:
-        log.warning(f"ADS-B track cleanup: {e}")
+    for attempt in range(3):
+        try:
+            with _db() as c:
+                deleted = c.execute(
+                    "DELETE FROM adsb_track WHERE ts < ?", (cutoff,)
+                ).rowcount
+                if deleted:
+                    log.info(f"ADS-B track cleanup: removed {deleted} old points")
+            return
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(30)
+            else:
+                log.warning(f"ADS-B track cleanup: {e}")
 
 def _adsb_cleanup_loop():
+    time.sleep(75)   # same startup-race guard as _ais_cleanup_loop (offset from it)
     _adsb_track_cleanup()
     while True:
         time.sleep(6 * 3600)
@@ -2084,7 +1551,7 @@ def _adsb_intel_update(aircraft: dict, info: dict):
         log.debug(f"aircraft_intel update {hx}: {e}")
 
 def _cross_correlate():
-    """Check for co-located AIS SAR vessels + ADS-B SAR aircraft — possible major incident."""
+    """Check for co-located AIS SAR vessels + ADS-B SAR aircraft — possible major SAR event."""
     now = time.time()
     with _ais_lock:
         sar_vessels = [v for v in _ais_vessels.values()
@@ -2281,184 +1748,16 @@ def _adsb_reader():
         time.sleep(ADSB_POLL_SECS)
 
 
-# ── remote pager poller ────────────────────────────────────────────────────────
-_REMOTE_PAGER_URL  = "http://192.168.0.147:8080/api/messages"
-_remote_last_id    = 0   # highest remote message ID already ingested
-
-def _ts_to_unix(ts_str: str) -> int:
-    try:
-        return int(time.mktime(time.strptime(ts_str, "%Y-%m-%d %H:%M:%S")))
-    except Exception:
-        return int(time.time())
-
-def _process_remote_pager_msg(m: dict):
-    capcode    = str(m.get("capcode", ""))
-    alert_type = m.get("alert_type", "General Page")
-    task_type  = m.get("task_type",  "")
-    asset      = m.get("asset",      "")
-    message    = m.get("message",    "")
-    ts         = _ts_to_unix(m.get("ts", ""))
-
-    # Try SFRS-style parsing on the message body (e.g. "F01P1 FIRE/DWELLING ...")
-    msg_clean = _clean(message)
-    im = _INCIDENT_RE.match(msg_clean)
-    if im:
-        sc   = im.group("sc")
-        appl = im.group("ap")
-        info = STATION_MAP.get(sc)
-        station_name = info["station"] if info else sc
-        area         = info.get("area","Unknown") if info else "Unknown"
-        prof = STATION_PROFILE.get(station_name, {})
-        color = (STATION_COLORS.get(station_name) or AREA_COLORS.get(area, "#e44"))
-        is_allowed = sc in cfg.get("allowed_stations", [])
-        gridref = lat = lon = map_url = None
-        gm = _GRID_RE.search(msg_clean)
-        if gm:
-            gridref = f"{gm.group(1)} {gm.group(2)} {gm.group(3)}"
-            ll = _gridref_latlon(gm.group(1), gm.group(2), gm.group(3))
-            if ll:
-                lat, lon = ll
-                map_url = (f"https://www.openstreetmap.org/?mlat={lat:.6f}&mlon={lon:.6f}"
-                           f"#map=16/{lat:.6f}/{lon:.6f}")
-        inc = {
-            "ts": ts, "addr": capcode, "speed": "512", "func": "0",
-            "kind": "Alpha", "raw_msg": msg_clean,
-            "station_code": sc, "station": station_name, "appliance": appl,
-            "incident_code": f"{sc}{appl}", "council": prof.get("Council",""),
-            "gridref": gridref, "lat": lat, "lon": lon, "map_url": map_url,
-            "color": color, "is_allowed": is_allowed,
-            "area": area, "profile": prof,
-        }
-        inc_id = _save_incident(inc)
-        inc["id"] = inc_id
-        pub = {k: v for k, v in inc.items() if k != "profile"}
-        if is_allowed:
-            def _notify_sfrs(i=inc):
-                p = i.get("profile", {})
-                title = f"SFRS Alert — {i['station']} ({i['incident_code']})"
-                body  = (f"Station: {i['station']}\nCode: {i['incident_code']}\n"
-                         f"Appliance: {i['appliance']}\nCouncil: {i['council']}\n"
-                         f"Pumps: {p.get('Pumps','?')}  TFC:{p.get('TFC','?')}  "
-                         f"NFR:{p.get('NFR','?')}  OSC:{p.get('OSC','?')}\n\n{i['raw_msg']}")
-                if i.get("map_url"): body += f"\n\nMap: {i['map_url']}"
-                _send_telegram(f"{title}\n\n{body}")
-                _send_gotify(title, body)
-            threading.Thread(target=_notify_sfrs, daemon=True).start()
-            _broadcast({"type": "incident", **pub})
-            log.info(f"REMOTE SFRS {inc['incident_code']} {station_name} {msg_clean[:60]}")
-        else:
-            _broadcast({"type": "seen", **pub})
-            log.debug(f"REMOTE SFRS (not allowed) {inc['incident_code']} {station_name}")
-        return
-
-    # ── RNLI / pager page ──────────────────────────────────────────────────────
-    station = m.get("station", "Unknown")
-    raw_msg = " | ".join(p for p in (message, task_type) if p) or capcode
-
-    # Resolve "Unknown station XXX" — capcode digits [2:5] encode either:
-    #   1-297  : RNLI group pager station ID (direct match in RNLI_CAPCODE_MAP)
-    #   400-699: cOACS individual crew pager (cOACS = station_ID + 400; not operational alerts)
-    #   700+   : non-RNLI pager traffic on the same frequency
-    if station.startswith("Unknown station"):
-        sid_str = station.split()[2] if len(station.split()) >= 3 else ""
-        try:
-            sid_int = int(sid_str)
-        except ValueError:
-            sid_int = 9999
-
-        # Direct group pager match (IDs 1-297)
-        mapped = RNLI_CAPCODE_MAP.get(sid_str.zfill(3))
-        if mapped:
-            station = mapped
-            log.info(f"RNLI capcode={capcode} resolved id={sid_str} → {station}")
-        elif 400 <= sid_int <= 699:
-            # cOACS individual crew pager — identify station but don't alert
-            crew_stn = RNLI_CAPCODE_MAP.get(str(sid_int - 400).zfill(3), "unknown")
-            log.debug(f"RNLI crew pager capcode={capcode} cOACS={sid_int} station={crew_stn}")
-            return
-        elif sid_int <= _RNLI_MAX_STATION_ID:
-            # Valid station ID range but not in our map yet — log for intelligence
-            log.info(f"RNLI INTEL capcode={capcode} station_id={sid_str} "
-                     f"type={alert_type} task={task_type!r} msg={message[:60]!r}")
-            return
-        else:
-            # Non-RNLI pager traffic on the frequency — discard
-            log.debug(f"RNLI DISCARD non-station capcode={capcode} id={sid_str}")
-            return
-
-    # Accept only known Scottish RNLI stations
-    stn_info = RNLI_STATION_MAP.get(station)
-    if not stn_info:
-        log.info(f"RNLI skip non-Scottish station={station!r} capcode={capcode}")
-        return
-
-    region  = stn_info.get("region", "Scotland")
-    council = stn_info.get("council", "RNLI Scotland")
-    boats   = stn_info.get("boats", "")
-    lat     = stn_info.get("lat")
-    lon     = stn_info.get("lon")
-    map_url = (f"https://www.openstreetmap.org/?mlat={lat:.4f}&mlon={lon:.4f}"
-               f"#map=14/{lat:.4f}/{lon:.4f}") if lat else None
-
-    inc = {
-        "ts": ts, "addr": capcode, "speed": "512", "func": "0",
-        "kind": alert_type, "raw_msg": raw_msg,
-        "station_code": f"RNLI-{station[:4].upper()}",
-        "station": station, "appliance": asset,
-        "incident_code": capcode, "council": council,
-        "gridref": None, "lat": lat, "lon": lon, "map_url": map_url,
-        "color": "#C8102E", "is_allowed": True, "area": region, "profile": {},
-    }
-    inc_id = _save_incident(inc)
-    inc["id"] = inc_id
-    pub   = {k: v for k, v in inc.items() if k != "profile"}
-    title = f"RNLI {alert_type} — {station}"
-    body  = f"Station: {station} ({region})\nCapcode: {capcode}"
-    if boats:                        body += f"\nBoats: {boats}"
-    if task_type:                    body += f"\nTask: {task_type}"
-    if asset and asset != "Unknown": body += f"\nAsset: {asset}"
-    if message:                      body += f"\n\n{message}"
-    if map_url:                      body += f"\n\nMap: {map_url}"
-    threading.Thread(target=lambda: (_send_telegram(f"{title}\n\n{body}"),
-                                     _send_gotify(title, body)), daemon=True).start()
-    _broadcast({"type": "incident", **pub})
-    log.info(f"RNLI {alert_type} capcode={capcode} station={station} boats={boats}")
-
-def _remote_pager_reader():
-    global _remote_last_id
-    # Initialise to current max so we don't replay history on startup
-    try:
-        data = json.loads(urllib.request.urlopen(_REMOTE_PAGER_URL, timeout=10).read())
-        if data:
-            _remote_last_id = max(m["id"] for m in data)
-            log.info(f"Remote pager: connected, last ID={_remote_last_id}")
-    except Exception as e:
-        log.warning(f"Remote pager init: {e}")
-    while True:
-        time.sleep(30)
-        try:
-            data = json.loads(urllib.request.urlopen(_REMOTE_PAGER_URL, timeout=10).read())
-            new  = sorted([m for m in data if m["id"] > _remote_last_id], key=lambda m: m["id"])
-            for m in new:
-                _process_remote_pager_msg(m)
-                _remote_last_id = m["id"]
-        except Exception as e:
-            log.debug(f"Remote pager poll: {e}")
-
-
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     global _ev_loop
     _ev_loop = asyncio.get_running_loop()
-    # PAGER DISABLED 2026-07-09 — remote pager Pi (192.168.0.147) decommissioned
-    # threading.Thread(target=_remote_status_sync, daemon=True).start()
     threading.Thread(target=_ais_reader, daemon=True).start()
     threading.Thread(target=_aisstream_reader, daemon=True).start()
     threading.Thread(target=_adsb_reader, daemon=True).start()
     threading.Thread(target=_watchdog, daemon=True).start()
     threading.Thread(target=_community_adsb_poll, daemon=True).start()
     threading.Thread(target=_aprs_is_reader, daemon=True).start()
-    # threading.Thread(target=_remote_pager_reader, daemon=True).start()
     yield
 
 app = FastAPI(title="AIS-ADSB DASHBOARD", lifespan=_lifespan)
@@ -2492,21 +1791,15 @@ async def photos(fname: str):
 
 @app.get("/api/health")
 async def health():
-    return {"ok":True,"version":_VERSION,"uptime":int(time.time()-_START_TIME),
-            "decoder":_dec_status,"error":_dec_error}
+    return {"ok":True,"version":_VERSION,"uptime":int(time.time()-_START_TIME)}
 
 @app.get("/api/events")
 async def sse(request: Request):
     q = asyncio.Queue(maxsize=300)
     with _sse_lock: _sse_clients.append(q)
-    with _db() as c:
-        recent = [dict(r) for r in c.execute(
-            "SELECT * FROM incidents ORDER BY ts DESC LIMIT 100").fetchall()]
     with _ais_lock:
         ais_snap = list(_ais_vessels.values())
-    init = {"type":"init","running":_dec_status=="running","state":_dec_status,
-            "error":_dec_error,"incidents":list(reversed(recent)),
-            "ais_connected":_ais_status=="connected","ais_vessels":ais_snap}
+    init = {"type":"init","ais_connected":_ais_status=="connected","ais_vessels":ais_snap}
     async def gen():
         try:
             yield f"data: {json.dumps(init)}\n\n"
@@ -2523,19 +1816,6 @@ async def sse(request: Request):
                 except ValueError: pass
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
-
-# PAGER DISABLED 2026-07-09 — decoder control endpoints commented out
-# @app.post("/api/decoder/start")
-# async def api_start():
-#     return await asyncio.get_event_loop().run_in_executor(None, start_decoder)
-#
-# @app.post("/api/decoder/stop")
-# async def api_stop():
-#     return stop_decoder()
-#
-# @app.post("/api/decoder/reset")
-# async def api_reset():
-#     return await asyncio.get_event_loop().run_in_executor(None, reset_decoder)
 
 # ── local SDR receiver control (AIS-catcher on Airspy, readsb on RTL-SDR) ──────
 _RECEIVERS = {
@@ -2596,76 +1876,6 @@ async def api_receiver_ctl(name: str, action: str):
                 "state": _rx_state(rx["service"])}
     return await asyncio.get_event_loop().run_in_executor(None, _ctl)
 
-@app.get("/api/incidents")
-async def api_incidents(
-    q:          str = Query(""),
-    station:    str = Query(""),
-    region:     str = Query(""),
-    alert_type: str = Query(""),
-    since:      int = Query(0),
-    page:       int = Query(1),
-    per:        int = Query(50),
-):
-    filters, params = [], []
-    if q:
-        filters.append("(raw_msg LIKE ? OR station LIKE ? OR addr LIKE ?)")
-        params += [f"%{q}%"] * 3
-    if station:    filters.append("station=?");    params.append(station)
-    if alert_type: filters.append("kind=?");       params.append(alert_type)
-    if since:      filters.append("ts>=?");        params.append(int(time.time()) - since)
-    where = ("WHERE " + " AND ".join(filters)) if filters else ""
-    with _db() as c:
-        all_rows = c.execute(
-            f"SELECT * FROM incidents {where} ORDER BY ts DESC", params).fetchall()
-    # Enrich with RNLI station data and optionally filter by region
-    enriched = []
-    for r in all_rows:
-        row = dict(r)
-        stn = RNLI_STATION_MAP.get(row.get("station", ""), {})
-        row["region"] = stn.get("region", row.get("area", ""))
-        row["boats"]  = stn.get("boats", row.get("appliance", ""))
-        if not row.get("lat") and stn.get("lat"):
-            row["lat"] = stn.get("lat")
-            row["lon"] = stn.get("lon")
-        if region and row["region"] != region:
-            continue
-        enriched.append(row)
-    total = len(enriched)
-    offset = (page - 1) * per
-    return {"total": total, "page": page, "per": per,
-            "rows": enriched[offset: offset + per]}
-
-@app.get("/api/incidents/summary")
-async def api_incidents_summary():
-    month_ago = int(time.time()) - 2592000
-    with _db() as c:
-        launches = c.execute(
-            "SELECT COUNT(*) FROM incidents WHERE kind IN ('Launch','Tasking Request') AND ts>=?",
-            (month_ago,)).fetchone()[0]
-        top = c.execute(
-            "SELECT station, COUNT(*) as n FROM incidents WHERE kind IN ('Launch','Tasking Request')"
-            " GROUP BY station ORDER BY n DESC LIMIT 1").fetchone()
-        last = c.execute(
-            "SELECT ts, station, kind FROM incidents ORDER BY ts DESC LIMIT 1").fetchone()
-    return {
-        "launches_this_month": launches,
-        "most_active_station": dict(top) if top else None,
-        "last_page": dict(last) if last else None,
-    }
-
-@app.get("/api/stats")
-async def api_stats():
-    today = int(time.time())-86400
-    with _db() as c:
-        total   = c.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
-        today_c = c.execute("SELECT COUNT(*) FROM incidents WHERE ts>=?",
-                            (today,)).fetchone()[0]
-        last    = c.execute(
-            "SELECT ts,station,incident_code FROM incidents ORDER BY ts DESC LIMIT 1"
-        ).fetchone()
-    return {"total":total,"today":today_c,"last":dict(last) if last else None,
-            "decoder":_dec_status,"version":_VERSION,"uptime":int(time.time()-_START_TIME)}
-
 @app.get("/api/settings")
 async def api_get_settings():
     return {k:cfg[k] for k in _DEFAULTS}
@@ -2676,51 +1886,7 @@ async def api_save_settings(request: Request):
     for k,v in body.items():
         if k in _DEFAULTS: cfg[k]=v
     _save_cfg({k:cfg[k] for k in _DEFAULTS})
-    # PAGER DISABLED 2026-07-09 — no longer push SDR settings to remote decoder Pi
-    # def _push():
-    #     ok, err = _push_remote_settings(cfg)
-    #     if ok:
-    #         global _dec_status, _dec_error
-    #         _dec_status = "running"; _dec_error = ""
-    #         log.info(f"Remote decoder settings pushed and restarted")
-    #     else:
-    #         log.warning(f"Remote settings push failed: {err}")
-    #     _broadcast(_status_evt())
-    # threading.Thread(target=_push, daemon=True).start()
     return {"ok":True}
-
-@app.get("/api/stations/seen")
-async def api_stations_seen():
-    """Return all station codes ever decoded, with counts — even non-allowed ones."""
-    with _db() as c:
-        rows = c.execute(
-            "SELECT station_code, station, COUNT(*) as n, MAX(ts) as last_ts "
-            "FROM incidents GROUP BY station_code ORDER BY n DESC"
-        ).fetchall()
-    known_codes = set(STATION_MAP.keys())
-    result = []
-    for r in rows:
-        sc = r["station_code"]
-        info = STATION_MAP.get(sc, {})
-        result.append({
-            "code":    sc,
-            "station": r["station"],
-            "area":    info.get("area", "Unknown / Unidentified"),
-            "count":   r["n"],
-            "last_ts": r["last_ts"],
-            "known":   sc in known_codes,
-            "allowed": sc in cfg.get("allowed_stations", []),
-        })
-    return result
-
-@app.post("/api/incidents/clear")
-async def api_clear_incidents():
-    with _db() as c:
-        c.execute("DELETE FROM incidents")
-        c.execute("DELETE FROM sqlite_sequence WHERE name='incidents'")
-        c.execute("VACUUM")
-    log.warning("Incident database cleared by user")
-    return {"ok": True}
 
 @app.get("/api/ais/vessels")
 async def api_ais_vessels():
@@ -2779,7 +1945,7 @@ def _fetch_tides_sync() -> dict:
         f"&start={now}&length=604800&lat={TIDE_LAT}&lon={TIDE_LON}&key={WORLDTIDES_KEY}"
     )
     try:
-        req  = urllib.request.Request(url, headers={"User-Agent": "PagerMonitor/1.0"})
+        req  = urllib.request.Request(url, headers={"User-Agent": "AisAdsbDashboard/1.0"})
         data = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
         if data.get("status", 0) != 200:
             return {"error": data.get("error", f"API status {data.get('status')}")}
@@ -2880,7 +2046,7 @@ async def api_aprs_lookup(calls: str = Query(...)):
             f"&apikey={APRS_FI_KEY}&format=json"
         )
         req = urllib.request.Request(url, headers={
-            "User-Agent": "PagerAISWeb/1.0 (+http://localhost:8083)"
+            "User-Agent": "AisAdsbDashboard/1.0 (+http://localhost:8083)"
         })
         data = json.loads(urllib.request.urlopen(req, timeout=10).read())
         return JSONResponse(data)
@@ -2897,46 +2063,13 @@ async def api_check_gotify():
         return {"ok":False,"error":str(e)}
 
 # ── HTML / JS / CSS ────────────────────────────────────────────────────────────
-def _station_list_by_area():
-    areas = {}
-    for code, info in STATION_MAP.items():
-        a = info.get("area", "Other")
-        areas.setdefault(a, []).append({
-            "code":  code,
-            "name":  info["station"],
-            "area":  a,
-            "color": STATION_COLORS.get(info["station"], AREA_COLORS.get(a, "#888")),
-        })
-    return [{"area": a, "stations": st} for a, st in areas.items()]
-
-def _rnli_stations_by_region() -> list:
-    regions: dict = {}
-    for name, info in RNLI_STATION_MAP.items():
-        r = info.get("region", "Other")
-        regions.setdefault(r, []).append({
-            "name": name, "boats": info.get("boats", ""),
-            "lat": info.get("lat"), "lon": info.get("lon"),
-        })
-    order = ["Clyde", "West", "North", "East", "SW", "Islands", "Orkney", "Shetland"]
-    return [{"region": r, "stations": regions[r]} for r in order if r in regions]
-
 _CFG_JS = json.dumps({
     "version":           _VERSION,
     "aprsCall":          _APRS_CALL,
     "mapLat":            55.93,
     "mapLon":            -4.72,
     "mapZoom":           11,
-    "stationColors":     STATION_COLORS,
-    "areaColors":        AREA_COLORS,
-    "stations":          {v["station"]:k for k,v in STATION_MAP.items()},
-    "stationList":       [{"code":k,"name":v["station"]} for k,v in STATION_MAP.items()],
-    "stationsByArea":    _station_list_by_area(),
-    "knownCodes":        list(STATION_MAP.keys()),
     "aisLabelColors":    AIS_LABEL_COLORS,
-    "rnliStationMap":    {n: {"region":i.get("region",""),"lat":i.get("lat"),"lon":i.get("lon"),"boats":i.get("boats","")}
-                          for n,i in RNLI_STATION_MAP.items()},
-    "rnliStationsByRegion": _rnli_stations_by_region(),
-    "rnliRegions":       ["Clyde","West","North","East","SW","Islands","Orkney","Shetland"],
 })
 
 _HTML = """<!DOCTYPE html>
@@ -2945,7 +2078,7 @@ _HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AIS-ADSB DASHBOARD</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>🚒</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>⚓</text></svg>">
 <link rel="stylesheet" href="/leaflet.css"/>
 <script src="/leaflet.js"></script>
 <script>
@@ -3002,36 +2135,6 @@ nav{display:flex;gap:.2rem;flex-wrap:wrap;border-top:1px solid var(--border);pad
 main{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column}
 .tab{display:none;flex:1;overflow:hidden;flex-direction:column}
 .tab.active{display:flex}
-/* ── LIVE TAB ── */
-#tab-live{padding:.75rem;gap:.75rem}
-.live-split{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:.75rem;overflow:hidden;min-height:0}
-.log-card{background:var(--card);border:1px solid var(--border);border-radius:8px;
-          display:flex;flex-direction:column;overflow:hidden}
-.log-header{padding:.5rem .75rem;border-bottom:1px solid var(--border);font-size:.75rem;
-            color:var(--muted);display:flex;justify-content:space-between;align-items:center;flex-shrink:0}
-#live-log{flex:1;overflow-y:auto;padding:.5rem .75rem;font-family:'SFMono-Regular',Consolas,monospace;
-          font-size:.72rem;line-height:1.5;color:#7ee787}
-#live-log .line-incident{color:var(--orange);font-weight:600}
-#live-log .line-normal{color:#8b949e}
-#map{border-radius:8px;border:1px solid var(--border);overflow:hidden}
-/* ── INCIDENTS TAB ── */
-#tab-incidents{padding:.75rem;gap:.75rem}
-.filter-row{display:flex;gap:.5rem;flex-shrink:0;flex-wrap:wrap}
-.filter-row input,.filter-row select{
-  background:var(--card);border:1px solid var(--border);color:var(--text);
-  padding:.35rem .65rem;border-radius:6px;font-size:.82rem}
-.filter-row input{flex:1;min-width:160px}
-.filter-row input:focus,.filter-row select:focus{outline:none;border-color:#C8102E}
-/* RNLI summary bar */
-.rnli-stat-chip{background:var(--card);border:1px solid var(--border);border-radius:8px;
-  padding:.4rem .75rem;display:flex;flex-direction:column;min-width:140px}
-.rnli-stat-label{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
-.rnli-stat-val{font-size:1.05rem;font-weight:700;color:#C8102E;margin-top:.1rem}
-/* RNLI row styling */
-tr.rnli-launch td:first-child{border-left:3px solid #C8102E}
-tr.rnli-general{opacity:.75}
-tr.rnli-pin-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:.9rem;padding:0 .2rem}
-tr.rnli-pin-btn:hover{color:#C8102E}
 .table-wrap{flex:1;overflow:auto;background:var(--card);border:1px solid var(--border);
             border-radius:8px;min-height:0}
 table{width:100%;border-collapse:collapse;font-size:.8rem}
@@ -3042,9 +2145,6 @@ tbody tr{border-bottom:1px solid #21262d;cursor:pointer;transition:.1s}
 tbody tr:hover{background:#1f2937}
 tbody td{padding:.45rem .75rem;vertical-align:middle}
 .badge{display:inline-block;padding:.15rem .5rem;border-radius:4px;font-size:.72rem;font-weight:600}
-.pager-row{display:flex;gap:1rem;align-items:center;flex-wrap:wrap;font-size:.78rem;color:var(--muted)}
-#pagination{display:flex;gap:.5rem;align-items:center;justify-content:center;padding:.5rem;
-            flex-shrink:0;font-size:.8rem}
 /* ── SETTINGS TAB ── */
 #tab-settings{padding:.75rem;overflow-y:auto}
 .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
@@ -3064,26 +2164,6 @@ tbody td{padding:.45rem .75rem;vertical-align:middle}
 .chip-ok{background:#1a3a1a;color:var(--green)}
 .chip-err{background:#3a1a1a;color:var(--red)}
 .chip-unk{background:#2a2a1a;color:var(--yellow)}
-/* ── MODAL ── */
-.modal-bg{position:fixed;inset:0;background:#000a;display:none;z-index:10000;
-          justify-content:center;align-items:flex-start;padding:2rem;overflow-y:auto}
-.modal-bg.open{display:flex}
-.modal{background:var(--card);border:1px solid var(--border);border-radius:10px;
-       width:100%;max-width:700px;overflow:hidden}
-.modal-header{display:flex;align-items:center;justify-content:space-between;
-              padding:.75rem 1rem;border-bottom:1px solid var(--border)}
-.modal-header h2{font-size:.95rem;font-weight:700;color:var(--orange)}
-.modal-close{background:none;border:none;color:var(--muted);font-size:1.3rem;
-             cursor:pointer;line-height:1;padding:.1rem .4rem;border-radius:4px}
-.modal-close:hover{background:var(--border);color:var(--text)}
-.modal-body{padding:1rem;display:grid;grid-template-columns:1fr 1fr;gap:1rem}
-.modal-fields{display:flex;flex-direction:column;gap:.4rem;font-size:.8rem}
-.mf-row{display:flex;gap:.5rem}
-.mf-label{color:var(--muted);width:130px;flex-shrink:0}
-.mf-val{color:var(--text);word-break:break-word}
-.mf-msg{margin-top:.5rem;padding:.5rem;background:#0d1117;border-radius:6px;
-        font-family:monospace;font-size:.75rem;color:#7ee787;word-break:break-all}
-#modal-map{height:280px;border-radius:8px;overflow:hidden;border:1px solid var(--border)}
 /* ── TOAST ── */
 #toast{position:fixed;bottom:1.5rem;right:1.5rem;background:var(--card);
        border:1px solid var(--orange);border-left:4px solid var(--orange);
@@ -3246,17 +2326,6 @@ tbody td{padding:.45rem .75rem;vertical-align:middle}
   /* nav: wraps to 2 rows, no scroll container (scroll conflicts with tap on Android) */
   nav{flex-wrap:wrap;gap:.15rem;padding:.2rem 0 .25rem}
   .tab-btn{font-size:.75rem;padding:.2rem .55rem;min-height:36px}
-  /* live tab */
-  #tab-live{padding:.4rem;gap:.4rem}
-  .live-split{grid-template-columns:1fr !important;gap:.4rem}
-  #map{min-height:52vh}
-  .log-card{max-height:28vh}
-  /* incidents tab */
-  #tab-incidents{padding:.4rem;gap:.4rem}
-  .filter-row{gap:.3rem}
-  .filter-row input,.filter-row select{font-size:.78rem;padding:.3rem .5rem}
-  .rnli-stat-chip{min-width:110px;padding:.3rem .5rem}
-  .rnli-stat-val{font-size:.9rem}
   /* tables */
   .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
   table{font-size:.72rem}
@@ -3276,10 +2345,6 @@ tbody td{padding:.45rem .75rem;vertical-align:middle}
   #vessel-panel.open,#aircraft-panel.open{transform:translateY(0)}
   #vessel-panel-photo{height:120px}
   #ac-panel-photo{height:120px}
-  /* modal */
-  .modal-bg{padding:.5rem;align-items:flex-end}
-  .modal{border-radius:10px 10px 0 0;max-width:100%}
-  .modal-body{grid-template-columns:1fr}
   /* settings */
   #tab-settings{padding:.4rem}
   .settings-grid{grid-template-columns:1fr}
@@ -3364,9 +2429,6 @@ tbody td{padding:.45rem .75rem;vertical-align:middle}
     <span id="hdr-clock"></span>
   </div>
   <nav>
-    <!-- PAGER DISABLED 2026-07-09: <button class="tab-btn" data-tab="live">Live</button> -->
-    <!-- INCIDENTS REMOVED 2026-07-09: <button class="tab-btn" data-tab="incidents">Incidents</button>
-         (pane #tab-incidents kept hidden in the DOM so JS references stay valid) -->
     <button class="tab-btn active" data-tab="ais">AIS</button>
     <button class="tab-btn" data-tab="weather">Weather</button>
     <button class="tab-btn" data-tab="adsb">ADSB</button>
@@ -3377,23 +2439,6 @@ tbody td{padding:.45rem .75rem;vertical-align:middle}
   </nav>
 </header>
 <div id="dbg" style="background:#1a3a1a;color:#7ee787;font-size:.7rem;padding:.2rem .6rem;text-align:center;display:none">JS loading…</div>
-
-<!-- PAGER DISABLED 2026-07-09: pager decoder status bar
-<div id="statusbar">
-  <div class="dot stopped" id="sdr-dot"></div>
-  <span id="sdr-text">Stopped</span>
-  <span id="sdr-error"></span>
-  <span class="status-sep">|</span>
-  <span id="freq-label">— MHz</span>
-  <span class="status-sep">|</span>
-  <span id="today-count">0 today</span>
-  <span class="status-sep">|</span>
-  <span id="total-count">0 total</span>
-  <div class="spacer"></div>
-  <button class="btn btn-start" id="btn-start" onclick="decoderStart()">▶ Start</button>
-  <button class="btn btn-stop"  id="btn-stop"  onclick="decoderStop()" disabled>■ Stop</button>
-</div>
--->
 
 <!-- receiver control bar: AIS-catcher (Airspy) + readsb (RTL-SDR) -->
 <div id="statusbar">
@@ -3416,111 +2461,9 @@ tbody td{padding:.45rem .75rem;vertical-align:middle}
 
 
 <main>
-  <!-- PAGER DISABLED 2026-07-09: LIVE tab (pager decoder output + incident map)
-  <div class="tab" id="tab-live">
-    <div class="live-split">
-      <div class="log-card">
-        <div class="log-header">
-          <span>Live decoder output</span>
-          <button class="btn btn-sm" onclick="clearLog()">Clear</button>
-        </div>
-        <div id="live-log"></div>
-      </div>
-      <div id="map"></div>
-    </div>
-  </div>
-  -->
-
-
-  <!-- ── INCIDENTS ── -->
-  <div class="tab" id="tab-incidents">
-    <!-- Activity summary bar -->
-    <div id="rnli-summary-bar" style="display:flex;gap:.75rem;flex-wrap:wrap;flex-shrink:0;margin-bottom:.25rem">
-      <div class="rnli-stat-chip" id="stat-launches">
-        <span class="rnli-stat-label">Launches this month</span>
-        <span class="rnli-stat-val" id="stat-launches-val">—</span>
-      </div>
-      <div class="rnli-stat-chip" id="stat-active">
-        <span class="rnli-stat-label">Most active station</span>
-        <span class="rnli-stat-val" id="stat-active-val">—</span>
-      </div>
-      <div class="rnli-stat-chip" id="stat-last">
-        <span class="rnli-stat-label">Last page</span>
-        <span class="rnli-stat-val" id="stat-last-val">—</span>
-      </div>
-    </div>
-    <!-- Filters -->
-    <div class="filter-row">
-      <input type="text" id="q" placeholder="Search station / capcode / message…"
-             oninput="fetchIncidents(1)">
-      <select id="filter-region" onchange="onRegionChange()">
-        <option value="">All regions</option>
-      </select>
-      <select id="filter-station" onchange="fetchIncidents(1)">
-        <option value="">All stations</option>
-      </select>
-      <select id="filter-alert-type" onchange="fetchIncidents(1)">
-        <option value="">All types</option>
-        <option value="Launch">Launch</option>
-        <option value="Tasking Request">Tasking Request</option>
-        <option value="General Page">General Page</option>
-      </select>
-      <select id="filter-period" onchange="fetchIncidents(1)">
-        <option value="0">All time</option>
-        <option value="86400">Today</option>
-        <option value="604800">Last 7 days</option>
-        <option value="2592000">Last 30 days</option>
-      </select>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr>
-          <th>Time</th><th>Station</th><th>Region</th><th>Alert Type</th>
-          <th>Boats</th><th>Capcode</th><th>Message</th><th></th>
-        </tr></thead>
-        <tbody id="incidents-body"></tbody>
-      </table>
-    </div>
-    <div id="pagination"></div>
-  </div>
-
   <!-- ── SETTINGS ── -->
   <div class="tab" id="tab-settings">
     <div class="settings-grid">
-      <!-- PAGER DISABLED 2026-07-09: SDR / pager decoder settings card
-      <div class="card">
-        <h3>SDR Settings</h3>
-        <div class="field"><label>Frequency</label><input id="s-freq"></div>
-        <div class="field"><label>Gain (dB)</label><input id="s-gain"></div>
-        <div class="field"><label>Protocol</label>
-          <select id="s-baud">
-            <option>POCSAG512</option>
-            <option>POCSAG1200</option>
-            <option>POCSAG2400</option>
-            <option>FLEX</option>
-          </select>
-        </div>
-        <div class="field"><label>SDR Device</label>
-          <div style="background:#161b22;border:1px solid #30363d;border-radius:4px;padding:6px 10px;font-size:11px;color:#8b949e">
-            Remote Pi @ 192.168.0.147 — device 0 (RTL2838)<br>
-            <span style="color:#f97316">Freq/Gain/Baud above are pushed to remote decoder on Save</span>
-          </div></div>
-        <div class="field"><label>Dedup window (seconds)</label><input id="s-dedup" type="number"></div>
-        <label class="checkbox-row"><input type="checkbox" id="s-autostart"> Auto-start decoder on service launch</label>
-        <div style="margin-top:.9rem;display:flex;gap:.75rem;align-items:center">
-          <button class="btn" onclick="resetSDR()"
-            style="background:#1a1500;border:1px solid var(--yellow);color:var(--yellow)">↺ Refresh SDR</button>
-          <span id="sdr-reset-msg" style="font-size:.78rem;color:var(--muted)"></span>
-        </div>
-      </div>
-      -->
-      <div class="card" style="grid-column:1/-1">
-        <h3>RNLI Station Alerts</h3>
-        <p style="font-size:.75rem;color:var(--muted);margin-bottom:.75rem">
-          Ticked stations trigger Telegram &amp; Gotify notifications on Launch / Tasking Request pages.
-          All decoded RNLI traffic is logged to the database regardless of selection.</p>
-        <div id="station-groups" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem"></div>
-      </div>
       <div class="card">
         <h3>Notifications</h3>
         <label class="checkbox-row"><input type="checkbox" id="s-telegram"> Telegram</label>
@@ -3531,17 +2474,13 @@ tbody td{padding:.45rem .75rem;vertical-align:middle}
           <button class="btn btn-sm" style="margin-top:.5rem" onclick="checkGotify()">Re-check</button>
         </div>
         <div style="margin-top:.75rem;font-size:.72rem;color:var(--muted)">
-          Credentials are stored in rnli_ais_adsb_dashboard.py — edit the file to change them.
+          Credentials are stored in secrets.json — edit the file and restart to change them.
         </div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-top:.1rem">
       <button class="btn btn-primary" onclick="saveSettings()">Save settings</button>
       <span id="settings-saved" style="font-size:.8rem;color:var(--green);display:none">Saved ✓</span>
-      <div style="flex:1"></div>
-      <button class="btn" id="btn-clear-db"
-        style="background:#2a0a0a;color:var(--red);border:1px solid var(--red)"
-        onclick="clearDatabase()">🗑 Clear incident database</button>
     </div>
   </div>
 
@@ -3760,20 +2699,6 @@ tbody td{padding:.45rem .75rem;vertical-align:middle}
   </div>
 </main>
 
-<!-- modal -->
-<div class="modal-bg" id="modal-bg" onclick="if(event.target===this)closeModal()">
-  <div class="modal">
-    <div class="modal-header">
-      <h2 id="modal-title">Incident</h2>
-      <button class="modal-close" onclick="closeModal()">×</button>
-    </div>
-    <div class="modal-body">
-      <div class="modal-fields" id="modal-fields"></div>
-      <div id="modal-map"></div>
-    </div>
-  </div>
-</div>
-
 <!-- vessel info panel (shared by AIS tab + live map overlay) -->
 <div id="vessel-panel">
   <img id="vessel-panel-photo" src="" alt="Vessel photo">
@@ -3878,162 +2803,7 @@ function _renderWatchBtn(mmsi) {
   btn.classList.toggle('watching', w);
 }
 
-let map = null, modalMap = null;
-let incMarkers = {};     // id → leaflet marker
-let currentPage = 1;
 let _toastTimer = null;
-let autoPan = true;
-
-// AIS live overlay
-let liveAisLayer = null;
-let liveAisMarkers = {};
-let liveAisOn = false;
-let _liveAisTimer = null;
-
-function initMap() {
-  if (!document.getElementById('map')) return; // PAGER DISABLED 2026-07-09 — live map removed from DOM
-  map = L.map('map', {zoomControl:true}).setView([CFG.mapLat, CFG.mapLon], CFG.mapZoom);
-
-  const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
-    attribution:'© OpenStreetMap © CartoDB', subdomains:'abcd', maxZoom:19
-  });
-  const street = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-    attribution:'© OpenStreetMap contributors', maxZoom:19
-  });
-  const satellite = L.tileLayer(
-    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{
-    attribution:'© Esri, Maxar, GeoEye', maxZoom:19
-  });
-  const topo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{
-    attribution:'© OpenTopoMap contributors', maxZoom:17
-  });
-
-  dark.addTo(map);
-  L.control.layers({'Dark':dark,'Street':street,'Satellite':satellite,'Topo':topo},{},{position:'topright'}).addTo(map);
-
-  // Auto-pan toggle
-  const panBtn = L.control({position:'bottomleft'});
-  panBtn.onAdd = function() {
-    const d = L.DomUtil.create('button','leaflet-bar leaflet-control');
-    d.id = 'autopan-btn';
-    d.title = 'Toggle auto-pan to new incidents';
-    d.style.cssText = 'padding:4px 8px;font-size:12px;cursor:pointer;background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:4px';
-    d.textContent = '📍 Auto-pan: ON';
-    d.onclick = function() {
-      autoPan = !autoPan;
-      d.textContent = '📍 Auto-pan: ' + (autoPan ? 'ON' : 'OFF');
-      d.style.color = autoPan ? '#3fb950' : '#8b949e';
-    };
-    return d;
-  };
-  panBtn.addTo(map);
-
-  addShipLegend(map);
-
-  // AIS overlay toggle
-  liveAisLayer = L.layerGroup().addTo(map);
-  const aisBtn = L.control({position:'bottomleft'});
-  aisBtn.onAdd = function() {
-    const d = L.DomUtil.create('button','leaflet-bar leaflet-control ais-live-btn');
-    d.id = 'ais-overlay-btn';
-    d.title = 'Toggle AIS vessel overlay';
-    d.textContent = '🚢 AIS: OFF';
-    L.DomEvent.on(d, 'click', function(e) {
-      L.DomEvent.stopPropagation(e);
-      toggleLiveAis(d);
-    });
-    return d;
-  };
-  aisBtn.addTo(map);
-}
-
-function toggleLiveAis(btn) {
-  liveAisOn = !liveAisOn;
-  btn = btn || document.getElementById('ais-overlay-btn');
-  if (btn) {
-    btn.textContent = liveAisOn ? '🚢 AIS: ON' : '🚢 AIS: OFF';
-    btn.classList.toggle('active', liveAisOn);
-  }
-  if (liveAisOn) {
-    refreshLiveAis();
-  } else {
-    clearTimeout(_liveAisTimer);
-    liveAisLayer.clearLayers();
-    liveAisMarkers = {};
-  }
-}
-
-function refreshLiveAis() {
-  if (!liveAisOn) return;
-  fetch('/api/ais/vessels').then(r=>r.json()).then(vessels => {
-    // remove stale
-    const seen = new Set(vessels.map(v=>v.mmsi));
-    Object.keys(liveAisMarkers).forEach(m => {
-      if (!seen.has(parseInt(m))) { liveAisLayer.removeLayer(liveAisMarkers[m]); delete liveAisMarkers[m]; }
-    });
-    vessels.forEach(v => {
-      if (v.lat == null || v.lon == null) return;
-      const watched = !!v.label || watchedMmsis.has(v.mmsi);
-      const icon    = makeShipIcon(v, watched, !!v.community);
-      if (liveAisMarkers[v.mmsi]) {
-        liveAisMarkers[v.mmsi].setLatLng([v.lat,v.lon]).setIcon(icon);
-        liveAisMarkers[v.mmsi]._aisData = v;
-      } else {
-        const mk = L.marker([v.lat,v.lon],{icon}).addTo(liveAisLayer);
-        mk._aisData = v;
-        mk.on('click', () => openVesselPanel(mk._aisData));
-        liveAisMarkers[v.mmsi] = mk;
-      }
-    });
-    const comm = vessels.filter(v=>v.community).length;
-    const btn  = document.getElementById('ais-overlay-btn');
-    if (btn) btn.textContent = '🚢 AIS: ON · ' + vessels.length + (comm ? ' (' + comm + '⚓)' : '');
-  }).catch(()=>{});
-  clearTimeout(_liveAisTimer);
-  _liveAisTimer = setTimeout(refreshLiveAis, 30000);
-}
-
-function makeIcon(color, size) {
-  const s = size||18;
-  return L.divIcon({
-    className:'',
-    html:`<div style="width:${s}px;height:${s}px;border-radius:50%;background:${color};
-               border:2px solid #fff;box-shadow:0 0 6px ${color}88"></div>`,
-    iconSize:[s,s], iconAnchor:[s/2,s/2], popupAnchor:[0,-s/2]
-  });
-}
-
-function addIncidentMarker(inc, isNew) {
-  if (!map) return; // PAGER DISABLED 2026-07-09 — live map removed from DOM
-  if (!inc.lat || !inc.lon || !map) return;
-  const ts    = new Date(inc.ts*1000).toLocaleString('en-GB');
-  const color = inc.color || CFG.stationColors[inc.station] || '#888';
-  const svUrl = `https://www.google.com/maps?q=&layer=c&cbll=${inc.lat},${inc.lon}`;
-  const gmUrl = `https://www.google.com/maps?q=${inc.lat},${inc.lon}&z=17`;
-  const mk = L.marker([inc.lat, inc.lon], {icon: makeIcon(color, isNew ? 22 : 18)})
-    .bindPopup(`
-      <div style="min-width:200px">
-        <b style="color:${color};font-size:1.05em">${inc.incident_code}</b>
-        <span style="color:#999"> — ${inc.station}</span><br>
-        <small style="color:#aaa">${ts}</small><br>
-        ${inc.gridref ? `<small style="color:#aaa">${inc.gridref}</small><br>` : ''}
-        <div style="margin:.4em 0;word-break:break-all;font-size:.8em">${inc.raw_msg||''}</div>
-        <div style="display:flex;gap:.4em;flex-wrap:wrap;margin-top:.4em">
-          ${inc.map_url ? `<a href="${inc.map_url}" target="_blank"
-            style="font-size:.75em;color:#f97316;text-decoration:none">🗺 OSM</a>` : ''}
-          <a href="${gmUrl}" target="_blank"
-            style="font-size:.75em;color:#f97316;text-decoration:none">📍 Google Maps</a>
-          <a href="${svUrl}" target="_blank"
-            style="font-size:.75em;color:#f97316;text-decoration:none">🚶 Street View</a>
-        </div>
-      </div>`)
-    .addTo(map);
-  incMarkers[inc.id] = mk;
-  if (isNew && autoPan) {
-    map.flyTo([inc.lat, inc.lon], 15, {duration: 1.2});
-    mk.openPopup();
-  }
-}
 
 // ── debounced table renders ────────────────────────────────────────────────────
 // SSE bursts (e.g. ~300 network aircraft every 30s) must NOT each rebuild the
@@ -4053,9 +2823,6 @@ const es = new EventSource('/api/events');
 es.onmessage = function(e) {
   const ev = JSON.parse(e.data);
   if (ev.type === 'init') {
-    updateDecoder(ev.running, ev.state, ev.error||'');
-    ev.incidents.forEach(i => addIncidentMarker(i, false));
-    updateStats();
     // AIS init
     updateAisStatus(ev.ais_connected, null);
     if (ev.ais_vessels && ev.ais_vessels.length) {
@@ -4066,18 +2833,6 @@ es.onmessage = function(e) {
         renderAisTable();
       }
     }
-  } else if (ev.type === 'status') {
-    updateDecoder(ev.running, ev.state, ev.error||'');
-    updateStats();
-  } else if (ev.type === 'log') {
-    appendLog(ev.text, false);
-  } else if (ev.type === 'incident') {
-    appendLog(ev.raw_msg||ev.incident_code, true);
-    addIncidentMarker(ev, true);
-    showToast(ev);
-    updateStats();
-    if (document.getElementById('tab-incidents').classList.contains('active'))
-      fetchIncidents(currentPage);
   } else if (ev.type === 'ais_status') {
     updateAisStatus(ev.connected, ev.count);
   } else if (ev.type === 'ais_vessel') {
@@ -4135,7 +2890,7 @@ es.onmessage = function(e) {
   }
 };
 es.onerror = function() {
-  updateDecoder(false, 'error', 'SSE connection lost — retrying…');
+  // EventSource auto-reconnects; receiver bar / watchdog cover visible status
 };
 
 // ── receiver controls (AIS-catcher / readsb) ──────────────────────────────────
@@ -4181,72 +2936,6 @@ function rxCtl(name, action) {
 loadRx();
 setInterval(loadRx, 10000);
 
-// ── decoder controls ───────────────────────────────────────────────────────────
-function updateDecoder(running, state, err) {
-  return; // PAGER DISABLED 2026-07-09 — statusbar removed from DOM
-  const dot  = document.getElementById('sdr-dot');
-  const txt  = document.getElementById('sdr-text');
-  const errEl= document.getElementById('sdr-error');
-  const bs   = document.getElementById('btn-start');
-  const bst  = document.getElementById('btn-stop');
-  dot.className = 'dot ' + state;
-  txt.textContent = state.charAt(0).toUpperCase()+state.slice(1)
-    + ' — remote Pi (192.168.0.147)';
-  errEl.textContent = err||'';
-  bs.disabled  = running || state==='starting';
-  bst.disabled = !running && state!=='starting';
-  // update freq label from settings
-  fetch('/api/settings').then(r=>r.json()).then(s=>{
-    document.getElementById('freq-label').textContent =
-      (s.freq||'153.075M')+' · '+(s.baud||'POCSAG512');
-  }).catch(()=>{});
-}
-
-function decoderStart() {
-  document.getElementById('btn-start').disabled = true;
-  fetch('/api/decoder/start',{method:'POST'}).then(r=>r.json()).then(d=>{
-    if (!d.ok) { showToastSimple('Start failed', d.error||''); }
-  });
-}
-function decoderStop() {
-  fetch('/api/decoder/stop',{method:'POST'});
-}
-function resetSDR() {
-  const msg = document.getElementById('sdr-reset-msg');
-  msg.textContent = 'Resetting…';
-  fetch('/api/decoder/reset',{method:'POST'}).then(r=>r.json()).then(d=>{
-    msg.textContent = d.ok ? 'Reset — ready to start' : (d.error||'Failed');
-    setTimeout(()=>{ msg.textContent=''; }, 4000);
-  });
-}
-
-// ── live log ──────────────────────────────────────────────────────────────────
-const logEl = document.getElementById('live-log');
-let logLines = 0;
-function appendLog(text, isIncident) {
-  if (!logEl) return; // PAGER DISABLED 2026-07-09 — live-log removed from DOM
-  const div = document.createElement('div');
-  div.className = isIncident ? 'line-incident' : 'line-normal';
-  const ts = new Date().toLocaleTimeString('en-GB');
-  div.textContent = ts+'  '+text;
-  logEl.appendChild(div);
-  logLines++;
-  if (logLines > 500) { logEl.removeChild(logEl.firstChild); logLines--; }
-  logEl.scrollTop = logEl.scrollHeight;
-}
-function clearLog() { if (!logEl) return; logEl.innerHTML=''; logLines=0; }
-
-// ── stats ─────────────────────────────────────────────────────────────────────
-function updateStats() {
-  return; // PAGER DISABLED 2026-07-09 — pager message counters removed from DOM
-  fetch('/api/stats').then(r=>r.json()).then(s=>{
-    document.getElementById('today-count').textContent = s.today+' today';
-    document.getElementById('total-count').textContent = s.total+' total';
-  }).catch(()=>{});
-}
-updateStats();
-setInterval(updateStats, 30000);
-
 // ── tabs ──────────────────────────────────────────────────────────────────────
 function showTab(name, btn) {
   try{const d=document.getElementById('dbg');d.style.background='#1a1a3a';d.style.color='#79c0ff';d.textContent='showTab('+name+') called';}catch(e){}
@@ -4256,8 +2945,6 @@ function showTab(name, btn) {
   btn.classList.add('active');
   try{document.getElementById('dbg').textContent='tab-'+name+' active: '+document.getElementById('tab-'+name).classList.contains('active');}catch(e){}
   closeVesselPanel();
-  if (name==='live' && map) setTimeout(()=>map.invalidateSize(),50);
-  if (name==='incidents') { fetchIncidents(1); loadIncidentsSummary(); }
   if (name==='settings') loadSettings();
   if (name==='ais') {
     initAisMap();
@@ -4588,129 +3275,6 @@ function searchAprsCall(call) {
     [parseFloat(aprsStations[call].lat), parseFloat(aprsStations[call].lng)] : [56.5,-4.5], 11);
 }
 
-// ── incidents table ───────────────────────────────────────────────────────────
-function fetchIncidents(page) {
-  currentPage = page;
-  const q   = encodeURIComponent(document.getElementById('q').value||'');
-  const st  = encodeURIComponent(document.getElementById('filter-station').value||'');
-  const reg = encodeURIComponent(document.getElementById('filter-region').value||'');
-  const at  = encodeURIComponent(document.getElementById('filter-alert-type').value||'');
-  const per = document.getElementById('filter-period').value||'0';
-  fetch(`/api/incidents?q=${q}&station=${st}&region=${reg}&alert_type=${at}&since=${per}&page=${page}&per=50`)
-    .then(r=>r.json()).then(renderIncidents);
-}
-
-function renderIncidents(data) {
-  const tbody = document.getElementById('incidents-body');
-  tbody.innerHTML = '';
-  data.rows.forEach(row => {
-    const tr = document.createElement('tr');
-    const ts  = new Date(row.ts*1000).toLocaleString('en-GB');
-    const kind = row.kind || '';
-    const isLaunch = kind==='Launch'||kind==='Tasking Request';
-    tr.className = isLaunch ? 'rnli-launch' : 'rnli-general';
-    const alertBadge = isLaunch
-      ? `<span class="badge" style="background:#C8102E22;color:#C8102E">${kind}</span>`
-      : `<span class="badge" style="background:#33383f;color:#8b949e">${kind||'—'}</span>`;
-    const stnInfo = CFG.rnliStationMap[row.station]||{};
-    const hasPin = stnInfo.lat && stnInfo.lon;
-    const pinBtn = hasPin
-      ? `<button class="rnli-pin-btn" title="Show on AIS map" onclick="event.stopPropagation();pinStationOnAis('${row.station}',${stnInfo.lat},${stnInfo.lon})">📍</button>`
-      : '';
-    const msg = (row.raw_msg||'').replace(/[\\x00-\\x1f]/g,'').trim();
-    tr.innerHTML =
-      `<td style="white-space:nowrap">${ts}</td>`+
-      `<td><b>${row.station||'—'}</b></td>`+
-      `<td style="color:var(--muted);font-size:.78rem">${row.region||'—'}</td>`+
-      `<td>${alertBadge}</td>`+
-      `<td style="font-size:.78rem;color:var(--muted)">${row.boats||'—'}</td>`+
-      `<td style="font-size:.75rem;color:var(--muted);font-family:monospace">${row.addr||'—'}</td>`+
-      `<td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"`+
-      ` title="${msg.replace(/"/g,'&quot;')}">${msg||'—'}</td>`+
-      `<td>${pinBtn}</td>`;
-    tr.onclick = () => openIncidentModal(row);
-    tbody.appendChild(tr);
-  });
-  renderPagination(data.total, data.page, data.per);
-}
-
-function renderPagination(total, page, per) {
-  const pages = Math.ceil(total/per)||1;
-  const el = document.getElementById('pagination');
-  el.innerHTML = `<span style="color:var(--muted)">${total} incident${total!==1?'s':''}</span>`;
-  if (pages<=1) return;
-  const prev = document.createElement('button');
-  prev.className='btn btn-sm'; prev.textContent='← Prev';
-  prev.disabled=(page<=1); prev.onclick=()=>fetchIncidents(page-1);
-  const next = document.createElement('button');
-  next.className='btn btn-sm'; next.textContent='Next →';
-  next.disabled=(page>=pages); next.onclick=()=>fetchIncidents(page+1);
-  const info = document.createElement('span');
-  info.style.color='var(--muted)';
-  info.textContent=`Page ${page} / ${pages}`;
-  el.append(prev,info,next);
-}
-
-function pinStationOnAis(name, lat, lon) {
-  showTab('ais', document.querySelector('.tab-btn[data-tab="ais"]'));
-  setTimeout(()=>{
-    if (aisMap) {
-      aisMap.setView([lat,lon],13);
-      L.popup().setLatLng([lat,lon])
-        .setContent(`<b>RNLI ${name}</b>`)
-        .openOn(aisMap);
-    }
-  }, 300);
-}
-
-// Populate region filter then station filter
-(function initIncidentFilters() {
-  const regSel = document.getElementById('filter-region');
-  CFG.rnliRegions.forEach(r => {
-    const o = document.createElement('option'); o.value=r; o.textContent=r;
-    regSel.appendChild(o);
-  });
-  _populateStationFilter('');
-})();
-
-function _populateStationFilter(regionFilter) {
-  const sel = document.getElementById('filter-station');
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">All stations</option>';
-  CFG.rnliStationsByRegion.forEach(grp => {
-    if (regionFilter && grp.region !== regionFilter) return;
-    const og = document.createElement('optgroup');
-    og.label = grp.region;
-    grp.stations.forEach(s => {
-      const o = document.createElement('option');
-      o.value = s.name; o.textContent = s.name;
-      og.appendChild(o);
-    });
-    sel.appendChild(og);
-  });
-  if (cur) sel.value = cur;
-}
-
-function onRegionChange() {
-  _populateStationFilter(document.getElementById('filter-region').value);
-  fetchIncidents(1);
-}
-
-function loadIncidentsSummary() {
-  fetch('/api/incidents/summary').then(r=>r.json()).then(d=>{
-    document.getElementById('stat-launches-val').textContent = d.launches_this_month ?? '0';
-    document.getElementById('stat-active-val').textContent =
-      d.most_active_station ? `${d.most_active_station.station} (${d.most_active_station.n})` : '—';
-    if (d.last_page) {
-      const ago = Math.round((Date.now()/1000 - d.last_page.ts)/60);
-      document.getElementById('stat-last-val').textContent =
-        `${d.last_page.station} — ${ago<60 ? ago+'m ago' : Math.round(ago/60)+'h ago'}`;
-    } else {
-      document.getElementById('stat-last-val').textContent = '—';
-    }
-  }).catch(()=>{});
-}
-
 // ── intel ─────────────────────────────────────────────────────────────────────
 let _intelRows = [];
 const _LABEL_COLORS = {
@@ -4837,120 +3401,19 @@ function renderVesIntelTable() {
   });
 }
 
-// ── modal ─────────────────────────────────────────────────────────────────────
-function openIncidentModal(row) {
-  const ts   = new Date(row.ts*1000).toLocaleString('en-GB');
-  const kind = row.kind || '';
-  const stnInfo = CFG.rnliStationMap[row.station] || {};
-  const lat  = row.lat  || stnInfo.lat;
-  const lon  = row.lon  || stnInfo.lon;
-  const isLaunch = kind==='Launch'||kind==='Tasking Request';
-  const kindCol  = isLaunch ? '#C8102E' : '#8b949e';
-  document.getElementById('modal-title').textContent =
-    `${kind||'RNLI Page'} — ${row.station||'—'}`;
-  const msg = (row.raw_msg||'').replace(/[\\x00-\\x1f]/g, ' ').trim();
-  const fields = [
-    ['Time',       ts],
-    ['Station',    row.station],
-    ['Region',     row.region || stnInfo.region || '—'],
-    ['Alert Type', `<span style="color:${kindCol};font-weight:600">${kind||'—'}</span>`],
-    ['Boats',      row.boats || stnInfo.boats || '—'],
-    ['Council',    row.council||'—'],
-    ['Capcode',    row.addr||'—'],
-    ['Protocol',   row.speed ? 'POCSAG'+row.speed : '—'],
-  ];
-  let html = fields.map(([l,v])=>
-    `<div class="mf-row"><span class="mf-label">${l}</span><span class="mf-val">${v||'—'}</span></div>`
-  ).join('');
-  if (msg) html += `<div class="mf-msg">${msg}</div>`;
-  if (row.map_url) html += `<a href="${row.map_url}" target="_blank" style="font-size:.75rem;color:#C8102E;margin-top:.5rem;display:block">Open station in OpenStreetMap ↗</a>`;
-  document.getElementById('modal-fields').innerHTML = html;
-
-  const mmEl = document.getElementById('modal-map');
-  if (lat && lon) {
-    mmEl.style.display='block';
-    if (modalMap) { modalMap.remove(); modalMap=null; }
-    setTimeout(()=>{
-      modalMap = L.map('modal-map').setView([lat,lon],14);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
-        attribution:'© OSM © CartoDB',subdomains:'abcd',maxZoom:19
-      }).addTo(modalMap);
-      L.marker([lat,lon],{icon:makeIcon('#C8102E',22)})
-        .addTo(modalMap)
-        .bindPopup(`<b>RNLI ${row.station}</b><br>${row.boats||''}`)
-        .openPopup();
-    },50);
-  } else {
-    mmEl.style.display='none';
-    if (modalMap) { modalMap.remove(); modalMap=null; }
-  }
-  document.getElementById('modal-bg').classList.add('open');
-}
-function closeModal() {
-  document.getElementById('modal-bg').classList.remove('open');
-  if (modalMap) { modalMap.remove(); modalMap=null; }
-}
-
 // ── settings ──────────────────────────────────────────────────────────────────
 function loadSettings() {
   fetch('/api/settings').then(r=>r.json()).then(s=>{
-    // PAGER DISABLED 2026-07-09 — SDR settings card removed from DOM
-    // document.getElementById('s-freq').value   = s.freq||'153.075M';
-    // document.getElementById('s-gain').value   = s.gain||'32.8';
-    // document.getElementById('s-baud').value   = s.baud||'POCSAG512';
-    // document.getElementById('s-device').value = s.device||'0';
-    // document.getElementById('s-dedup').value  = s.dedup_seconds||60;
-    // document.getElementById('s-autostart').checked = !!s.autostart;
     document.getElementById('s-telegram').checked  = !!s.telegram_enabled;
     document.getElementById('s-gotify').checked    = !!s.gotify_enabled;
-
-    const allowed = s.allowed_stations || [];
-    const sg = document.getElementById('station-groups');
-    sg.innerHTML = '';
-    const regionColors = {
-      Clyde:'#C8102E', West:'#f97316', North:'#3b82f6', East:'#22c55e',
-      SW:'#a855f7', Islands:'#06b6d4', Orkney:'#eab308', Shetland:'#64748b'
-    };
-    CFG.rnliStationsByRegion.forEach(grp => {
-      const col = document.createElement('div');
-      col.style.cssText = 'background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:.5rem';
-      const title = document.createElement('div');
-      const rc = regionColors[grp.region] || '#C8102E';
-      title.style.cssText = `font-size:.72rem;font-weight:700;color:${rc};margin-bottom:.4rem;letter-spacing:.03em`;
-      title.textContent = grp.region.toUpperCase();
-      col.appendChild(title);
-      grp.stations.forEach(st => {
-        const lbl = document.createElement('label');
-        lbl.className = 'checkbox-row';
-        lbl.style.fontSize = '.78rem';
-        const inp = document.createElement('input');
-        inp.type = 'checkbox'; inp.className = 'station-chk'; inp.value = st.name;
-        inp.checked = allowed.length === 0 || allowed.includes(st.name);
-        const dot = document.createElement('span');
-        dot.style.cssText = `display:inline-block;width:7px;height:7px;border-radius:50%;background:${rc};margin:0 3px 0 2px;flex-shrink:0`;
-        lbl.appendChild(inp); lbl.appendChild(dot);
-        lbl.appendChild(document.createTextNode(st.name));
-        col.appendChild(lbl);
-      });
-      sg.appendChild(col);
-    });
   });
   checkGotify();
 }
 
 function saveSettings() {
-  const allowed = [...document.querySelectorAll('.station-chk:checked')].map(c=>c.value);
   const body = {
-    // PAGER DISABLED 2026-07-09 — SDR settings card removed from DOM
-    // freq:             document.getElementById('s-freq').value.trim(),
-    // gain:             document.getElementById('s-gain').value.trim(),
-    // baud:             document.getElementById('s-baud').value,
-    // device:           document.getElementById('s-device').value.trim(),
-    // dedup_seconds:    parseInt(document.getElementById('s-dedup').value)||60,
-    // autostart:        document.getElementById('s-autostart').checked,
     telegram_enabled: document.getElementById('s-telegram').checked,
     gotify_enabled:   document.getElementById('s-gotify').checked,
-    allowed_stations: allowed,
   };
   fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify(body)})
@@ -4959,25 +3422,6 @@ function saveSettings() {
       el.style.display='inline';
       setTimeout(()=>el.style.display='none',3000);
     });
-}
-
-function clearDatabase() {
-  if (!confirm('Delete every incident from the database?\\nThis cannot be undone.')) return;
-  if (!confirm('Are you sure? All history will be permanently deleted.')) return;
-  fetch('/api/incidents/clear', {method:'POST'}).then(r=>r.json()).then(d=>{
-    if (d.ok) {
-      // clear map markers
-      Object.values(incMarkers).forEach(m => m.remove());
-      incMarkers = {};
-      // clear log
-      clearLog();
-      // refresh table if open
-      if (document.getElementById('tab-incidents').classList.contains('active'))
-        fetchIncidents(1);
-      updateStats();
-      showToastSimple('Database cleared', 'All incident records deleted.');
-    }
-  });
 }
 
 function checkGotify() {
@@ -4995,16 +3439,6 @@ function checkGotify() {
 }
 
 // ── toast ─────────────────────────────────────────────────────────────────────
-function showToast(inc) {
-  document.getElementById('toast-title').textContent =
-    `🚒 ${inc.incident_code} — ${inc.station}`;
-  document.getElementById('toast-body').textContent =
-    inc.raw_msg||'New incident';
-  const t = document.getElementById('toast');
-  t.classList.remove('hide');
-  clearTimeout(_toastTimer);
-  _toastTimer = setTimeout(()=>t.classList.add('hide'), 8000);
-}
 function showToastSimple(title, body) {
   document.getElementById('toast-title').textContent = title;
   document.getElementById('toast-body').textContent  = body;
@@ -6022,8 +4456,6 @@ document.querySelectorAll('.tab-btn[data-tab]').forEach(btn => {
 });
 
 // ── start ─────────────────────────────────────────────────────────────────────
-// PAGER DISABLED 2026-07-09 — Live tab gone; boot straight into the AIS tab
-initMap();
 showTab('ais', document.querySelector('.tab-btn[data-tab="ais"]'));
 </script>
 </body>

@@ -11,9 +11,8 @@ for your own area.
 
 > **Project history:** this repository originally hosted *pager2gotify*, a small
 > multimon-ng → Gotify bridge for POCSAG pager traffic. That script grew into this
-> full web dashboard. The old pager decoding code still exists in the source but is
-> currently disabled (search the file for `PAGER DISABLED`). The original script
-> remains available in this repo's git history.
+> full web dashboard and the pager code has since been removed entirely. The
+> original script remains available in this repo's git history.
 
 ---
 
@@ -64,7 +63,7 @@ local hardware.
 ## Installation
 
 ```bash
-git clone https://github.com/bertonumber1/pager2gotify.git ais-adsb-dashboard
+git clone https://github.com/bertonumber1/ais-adsb-dashboard.git
 cd ais-adsb-dashboard
 pip3 install -r requirements.txt        # on Debian/RPi OS add: --break-system-packages
 ```
@@ -85,7 +84,6 @@ nano secrets.json
 | `aisstream_key` | Community AIS WebSocket feed | [aisstream.io](https://aisstream.io/) (free) |
 | `aprs_fi_key` | aprs.fi API key for watched callsigns | [aprs.fi → My account](https://aprs.fi/) |
 | `aprs_callsign` | Your amateur callsign for the APRS-IS login | your licence |
-| `remote_decoder_*` | SSH details of an optional remote pager-SDR Pi | leave blank (pager code is disabled) |
 
 Leave any key you don't use as an empty string — the related feature just stays off.
 `secrets.json` is gitignored so your credentials never end up in a commit.
@@ -99,7 +97,6 @@ All location-specific data lives in constants near the top of
 - `AISSTREAM_BOX` — AIS community bounding box
 - `CFG mapLat/mapLon` (search `_CFG_JS`) — map centre
 - `AIS_MMSI_RULES` / `AIS_NAME_RULES` — watched vessels
-- `RNLI_STATION_MAP` — lifeboat stations (Scotland by default)
 - `_APRS_FILTER` — APRS-IS radius filter
 
 ### 3. Run it
@@ -114,7 +111,7 @@ intel to `incidents.db` (SQLite), photos are cached in `photos/`.
 ### 4. Run as a service
 
 ```bash
-sudo cp rnli.service.example /etc/systemd/system/ais-dashboard.service
+sudo cp ais-dashboard.service.example /etc/systemd/system/ais-dashboard.service
 sudo nano /etc/systemd/system/ais-dashboard.service   # fix User= and the two paths
 sudo systemctl daemon-reload
 sudo systemctl enable --now ais-dashboard.service

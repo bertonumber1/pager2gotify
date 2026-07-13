@@ -2,5 +2,4 @@ fastapi
 uvicorn
 websockets
 cloudscraper
-paramiko
 aprslib

@@ -1,12 +1,4 @@
 {
-  "freq": "153.075M",
-  "gain": "40",
-  "baud": "POCSAG512",
-  "device": "rtl_tcp:192.168.0.147:1234",
-  "sample_rate": "22050",
   "telegram_enabled": true,
-  "gotify_enabled": true,
-  "allowed_stations": [],
-  "dedup_seconds": 60,
-  "autostart": true
+  "gotify_enabled": true
 }
