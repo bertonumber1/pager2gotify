@@ -16,6 +16,29 @@ for your own area.
 
 ---
 
+## Screenshots
+
+Live captures from the Firth of Clyde station (the running station may be a
+little ahead of this repo, so tab names can differ slightly).
+
+**AIS — live shipping on the Clyde** (498 vessels, military ops flagged):
+
+![AIS tab](docs/screenshots/ais.png)
+
+**ADSB — local receiver + community feeds** (military/SAR highlighted, MLAT):
+
+![ADSB tab](docs/screenshots/adsb.png)
+
+**APRS — APRS-IS + LoRa stations, watched-callsign lookup:**
+
+![APRS tab](docs/screenshots/aprs.png)
+
+**Intel — persistent history of every military/SAR/watched contact:**
+
+![Intel tab](docs/screenshots/intel.png)
+
+---
+
 ## Features
 
 | Tab | What you get |
